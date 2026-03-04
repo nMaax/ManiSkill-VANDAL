@@ -1,0 +1,84 @@
+diff --git a/mani_skill/trajectory/replay_trajectory.py b/mani_skill/trajectory/replay_trajectory.py
+index 0e8cb5f8..4750cd81 100644
+--- a/mani_skill/trajectory/replay_trajectory.py
++++ b/mani_skill/trajectory/replay_trajectory.py
+@@ -276,7 +276,7 @@ def replay_cpu_sim(
+                     trajectories[traj_id]["env_states"]
+                 )
+                 if ori_env is not None:
+-                    ori_env.set_state_dict(ori_env_states[0])
++                    ori_env.unwrapped.set_state_dict(ori_env_states[0])
+                 env.base_env.set_state_dict(ori_env_states[0])
+                 ori_env_states = ori_env_states[1:]
+                 if args.save_traj:
+diff --git a/mani_skill/trajectory/utils/actions/conversion.py b/mani_skill/trajectory/utils/actions/conversion.py
+index df818b39..5e2bc4b1 100644
+--- a/mani_skill/trajectory/utils/actions/conversion.py
++++ b/mani_skill/trajectory/utils/actions/conversion.py
+@@ -94,8 +94,8 @@ def from_pd_joint_pos_to_ee(
+     if pbar is not None:
+         pbar.reset(total=n)
+ 
+-    ori_controller: CombinedController = ori_env.agent.controller
+-    controller: CombinedController = env.agent.controller
++    ori_controller: CombinedController = ori_env.unwrapped.agent.controller
++    controller: CombinedController = env.unwrapped.agent.controller
+     assert (
+         "arm" in ori_controller.controllers
+     ), "Could not find the controller for the robot arm. This controller conversion tool requires there to be a key called 'arm' in the controller"
+@@ -120,12 +120,12 @@ def from_pd_joint_pos_to_ee(
+         if pbar is not None:
+             pbar.update()
+ 
+-        ori_action = common.to_tensor(ori_actions[t], device=env.device)
++        ori_action = common.to_tensor(ori_actions[t], device=env.unwrapped.device)
+         ori_action_dict = common.to_tensor(
+-            ori_controller.to_action_dict(ori_action), device=env.device
++            ori_controller.to_action_dict(ori_action), device=env.unwrapped.device
+         )
+         output_action_dict = common.to_tensor(
+-            ori_action_dict.copy(), device=env.device
++            ori_action_dict.copy(), device=env.unwrapped.device
+         )  # do not in-place modify
+         ori_env.step(ori_action)
+ 
+@@ -230,8 +230,8 @@ def from_pd_joint_pos(
+     if pbar is not None:
+         pbar.reset(total=n)
+ 
+-    ori_controller: CombinedController = ori_env.agent.controller
+-    controller: CombinedController = env.agent.controller
++    ori_controller: CombinedController = ori_env.unwrapped.agent.controller
++    controller: CombinedController = env.unwrapped.agent.controller
+ 
+     info = {}
+ 
+@@ -273,7 +273,7 @@ def from_pd_joint_pos(
+             output_action_dict["arm"] = arm_action
+ 
+             output_action = controller.from_action_dict(
+-                common.to_tensor(output_action_dict, device=env.device)
++                common.to_tensor(output_action_dict, device=env.unwrapped.device)
+             )
+             _, _, _, _, info = env.step(output_action)
+             if render:
+@@ -298,8 +298,8 @@ def from_pd_joint_delta_pos(
+     if pbar is not None:
+         pbar.reset(total=n)
+ 
+-    ori_controller: CombinedController = ori_env.agent.controller
+-    controller: CombinedController = env.agent.controller
++    ori_controller: CombinedController = ori_env.unwrapped.agent.controller
++    controller: CombinedController = env.unwrapped.agent.controller
+     ori_arm_controller: PDJointPosController = ori_controller.controllers["arm"]
+ 
+     assert output_mode == "pd_joint_pos", output_mode
+@@ -324,7 +324,7 @@ def from_pd_joint_delta_pos(
+ 
+         output_action_dict["arm"] = arm_action
+         output_action = controller.from_action_dict(
+-            common.to_tensor(output_action_dict, device=env.device)
++            common.to_tensor(output_action_dict, device=env.unwrapped.device)
+         )
+         _, _, _, _, info = env.step(output_action)
+ 

@@ -9,3 +9,6 @@ markers = [
     "gpu_sim: marks tests as using the GPU simulation (deselect with '-m \"not gpu_sim\"')",
     "serial",
 ]
+
+[tool.ruff]
+target-version = "py310"

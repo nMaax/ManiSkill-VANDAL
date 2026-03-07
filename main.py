@@ -15,6 +15,7 @@ import h5py
 import numpy as np
 from torch.utils.data import Dataset
 from tqdm import tqdm
+import shutil
 
 from mani_skill.utils.io_utils import load_json
 from mani_skill.utils import common
@@ -33,9 +34,11 @@ DS_PATH = "/home/massimiliano/.maniskill/demos/PickCube-v1/motionplanning/"
 
 H5_PATH = DS_PATH + "trajectory.h5"
 REPLAYED_H5_PATH = DS_PATH + "trajectory.state.pd_ee_delta_pos.physx_cpu.h5"
+EMBEDDINGS_H5_PATH = REPLAYED_H5_PATH.replace(".h5", ".embeddings.h5")
 
 JS_PATH = DS_PATH + "trajectory.json"
 REPLAYED_JS_PATH = DS_PATH + "trajectory.state.pd_ee_delta_pos.physx_cpu.json"
+EMBEDDINGS_JS_PATH = REPLAYED_JS_PATH.replace(".json", ".embeddings.json")
 
 CHECKPOINT_PATH = "gatautoencoder_checkpoint_E50_2026-03-06T16:28:41.304114.pth"
 
@@ -525,7 +528,63 @@ embedding_dataset = EmbeddingDataset(dataset, model, device)
 Save the resulting embeddings as a new key in the dataset (HDF5/Zarr).
 """
 
-# TODO: later, unless it becomes to heavy to compute everything
+# TODO: later
+
+
+def compute_and_store_embeddings(model, dataset, base_h5_path, output_h5_path):
+    """
+    Copies the original HDF5 file and appends embeddings for each frame under each trajectory group.
+    """
+    if os.path.exists(base_h5_path):
+        shutil.copy(base_h5_path, output_h5_path)
+        base_json_path = base_h5_path.replace(".h5", ".json")
+        output_json_path = base_json_path.replace(".json", ".embeddings.json")
+        print("Copied HDF5 data to new file for embedding storage.")
+    else:
+        raise FileNotFoundError(f"Base HDF5 file not found at {base_h5_path}")
+
+    if os.path.exists(base_json_path):
+        shutil.copy(base_json_path, output_json_path)
+        print(f"Copied JSON metadata to {output_json_path}.")
+    else:
+        print(f"Warning: Expected JSON metadata not found at {base_json_path}")
+
+    with h5py.File(output_h5_path, "a") as f:
+        for idx, traj_name in enumerate(f.keys()):
+            traj_group = f[traj_name]
+            num_frames = len(traj_group["env_states"]["actors"]["cube"])
+            embeddings = []
+            for frame in tqdm(range(num_frames), desc=f"Processing {traj_name}"):
+                graph = build_graph(idx)
+                graph = graph.to(device)
+                model.eval()
+                with torch.no_grad():
+                    emb = model.encode(
+                        graph.x,
+                        graph.edge_index,
+                        torch.zeros(
+                            graph.x.shape[0], dtype=torch.long, device=graph.x.device
+                        ),
+                    )
+                embeddings.append(emb.cpu().numpy().squeeze())
+            embeddings = np.stack(embeddings)
+            traj_group["env_states"].create_dataset("embeddings", data=embeddings)
+    print(f"Embeddings computed and stored in {output_h5_path}")
+
+
+if not os.path.exists(EMBEDDINGS_H5_PATH):
+    print(
+        f"Embeddings H5 dataset {EMBEDDINGS_H5_PATH} not found. Computing and storing embeddings..."
+    )
+    compute_and_store_embeddings(model, dataset, REPLAYED_H5_PATH, EMBEDDINGS_H5_PATH)
+
+embeddings_dataset = ManiSkillTrajectoryDataset(EMBEDDINGS_H5_PATH)
+print(
+    f"""Dataset lenght: {
+        len(dataset)
+    }, i.e., number of episodes/trajectories * frames per episode (-> (priv_state, observation, action) 3-ple for training later"""
+)
+print_dict_tree(embeddings_dataset[999])
 
 # Smoothing:
 """

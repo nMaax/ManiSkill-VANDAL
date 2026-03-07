@@ -514,12 +514,16 @@ def compute_and_store_embeddings(model, base_h5_path, output_h5_path):
         print(f"Warning: Expected JSON metadata not found at {base_json_path}")
 
     with h5py.File(output_h5_path, "a") as f:
-        for idx, traj_name in enumerate(f.keys()):
+        global_frame_idx = 0
+        trajectories = sorted(list(f.keys()), key=lambda x: int(x.split("_")[1]))
+        for traj_name in tqdm(trajectories):  # Loop over episodes/trajectories
             traj_group = f[traj_name]
-            num_frames = len(traj_group["env_states"]["actors"]["cube"])
+            num_frames = len(traj_group["actions"])
             embeddings = []
-            for frame in tqdm(range(num_frames), desc=f"Processing {traj_name}"):
-                graph = build_graph(idx + frame)
+            for _ in range(
+                num_frames
+            ):  # Loop over frames within the episode/trajectory
+                graph = build_graph(global_frame_idx)
                 graph = graph.to(device)
                 model.eval()
                 with torch.no_grad():
@@ -531,6 +535,7 @@ def compute_and_store_embeddings(model, base_h5_path, output_h5_path):
                         ),
                     )
                 embeddings.append(emb.cpu().numpy().squeeze())
+                global_frame_idx += 1
             embeddings = np.stack(embeddings)
             traj_group["env_states"].create_dataset("embeddings", data=embeddings)
     print(f"Embeddings computed and stored in {output_h5_path}")
@@ -590,24 +595,25 @@ def compute_trajectory_embeddings_similarity(trajectory_embeddings):
     return sim_scores, sim_extreme
 
 
-def check_temporal_consistency(episode_idx):
-    episode = embeddings_dataset[
-        episode_idx : episode_idx + episode_lengths[episode_idx]
-    ]
+def check_temporal_consistency(start_frame_idx, episode_length):
+    episode = embeddings_dataset[start_frame_idx : start_frame_idx + episode_length]
     embeddings = torch.tensor(episode["priv_states"]["embeddings"])
 
     sim_scores, sim_extreme = compute_trajectory_embeddings_similarity(embeddings)
 
-    print("\nEpisode", episode_idx)
     print(f"Mean Temporal Similarity: {sim_scores.mean().item():.4f}")
     print(f"Min Temporal Similarity: {sim_scores.min().item():.4f}")
     print(f"Max Temporal Similarity: {sim_scores.max().item():.4f}")
     print(f"Dissimilarity (First vs Last): {sim_extreme.item():.4f}")
 
 
+start_idx = 0
 episode_lengths = get_all_episode_lengths(EMBEDDINGS_JS_PATH)
 for i in range(1000):
-    check_temporal_consistency(i)
+    print(f"\nEpisode {i}")
+    episode_len = episode_lengths[i]
+    check_temporal_consistency(start_idx, episode_len)
+    start_idx += episode_len
 
 # Phase 4: Policy Training & Evaluation
 

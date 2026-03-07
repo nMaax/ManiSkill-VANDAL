@@ -24,10 +24,11 @@ from mani_skill.utils import common
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.data import DataLoader as TorchDataLoader
 
 from torch_geometric.nn import GATConv, global_mean_pool
 from torch_geometric.data import Data
-from torch_geometric.loader import DataLoader
+from torch_geometric.loader import DataLoader as GeoDataLoader
 
 torch.manual_seed(42)
 
@@ -310,7 +311,7 @@ def build_graph(idx):
     goal_x = np.concatenate([goal_xyz, [0, 1, 0]])
     hand_x = np.concatenate([hand_xyz, [0, 0, 1]])
 
-    # Nodes (X) now has shape [3, 6]
+    # Nodes (X) has shape [3, 6]
     x = torch.tensor(np.array([cube_x, goal_x, hand_x]), dtype=torch.float)
 
     edge_index = torch.tensor(
@@ -320,7 +321,8 @@ def build_graph(idx):
     return Data(x=x, edge_index=edge_index)
 
 
-print(build_graph(999))
+# Try it out
+print(build_graph(0))
 
 
 # Phase 2: Representation Learning (The GAE)
@@ -328,13 +330,7 @@ print(build_graph(999))
 # Architecture:
 """
 Design a GNN-based Auto-Encoder (GCN or GAT).
-"""
-# Bottleneck:
-"""
 Compress the graph into a fixed-length latent vector z.
-"""
-# Validation:
-"""
 Ensure the embedding z is expressive enough to reconstruct the scene geometry accurately.
 """
 
@@ -344,7 +340,7 @@ Ensure the embedding z is expressive enough to reconstruct the scene geometry ac
 class GATAutoencoder(nn.Module):
     def __init__(self, in_channels, hidden_channels, latent_channels, heads=4):
         super().__init__()
-        # ENCODER: Maps 6 dims -> hidden
+        # XXX: ENCODER: Maps 6 dims -> hidden
         self.encoder_conv1 = GATConv(in_channels, hidden_channels, heads=heads)
         self.encoder_conv2 = GATConv(
             hidden_channels * heads, latent_channels, heads=1, concat=False
@@ -364,47 +360,51 @@ class GATAutoencoder(nn.Module):
         x = F.elu(x)
         node_z = self.encoder_conv2(x, edge_index)
 
-        # THE BOTTLENECK: Pool all nodes in the graph into ONE vector z
+        # XXX: Pool all nodes in the graph into ONE vector z (bottleneck)
         global_z = global_mean_pool(node_z, batch)
         return global_z
 
     def forward(self, data):
-        # 1. Encode to a single scene vector [BatchSize, latent_channels]
+        # Encode to a single scene vector [BatchSize, latent_channels]
         global_z = self.encode(data.x, data.edge_index, data.batch)
 
-        # 2. To decode, we expand the global vector back to all nodes
+        # To decode, we expand the global vector back to all nodes
         z_expanded = global_z[data.batch]
 
-        # 3. Give the decoder the Scene Context (z) AND the Node Identity (last 3 columns of x)
+        # XXX: Give the decoder the Scene Context (z) AND the Node Identity (last 3 columns of x)
         identities = data.x[:, 3:]
         dec_input = torch.cat([z_expanded, identities], dim=-1)
 
-        # 4. Predict XYZ
+        # Predict XYZ
         reconstructed_xyz = self.decoder(dec_input)
 
         return reconstructed_xyz, global_z
 
 
+# TODO: should use more than 3 columns for training
 def train_epoch(model, loader, optimizer, device):
     model.train()
     total_loss = 0
     for data in loader:
+        # Load datta on device
         data = data.to(device)
         optimizer.zero_grad()
 
         # Forward pass
         out, _ = model(data)
 
-        # Target is ONLY the first 3 columns (XYZ)
+        # Target is only the first 3 columns (XYZ) for simplicity
         target_xyz = data.x[:, :3]
         loss = F.mse_loss(out, target_xyz)
 
+        # Backward pass
         loss.backward()
         optimizer.step()
         total_loss += loss.item() * data.num_graphs
     return total_loss / len(loader.dataset)
 
 
+# TODO: here too
 @torch.no_grad()
 def validate(model, loader, device):
     model.eval()
@@ -413,24 +413,26 @@ def validate(model, loader, device):
         data = data.to(device)
         # Forward pass
         out, _ = model(data)
-        # Target is ONLY the first 3 columns (XYZ)
+        # Target is only the first 3 columns (XYZ)
         target_xyz = data.x[:, :3]
         loss = F.mse_loss(out, target_xyz)
         total_loss += loss.item() * data.num_graphs
     return total_loss / len(loader.dataset)
 
 
-# Training and Validation Execution
+# Training and Validation execution
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Working on {device}")
 
-# Assuming you've created a list of Data objects using your build_graph function
+# Create a list of Data objects using build_graph function
 data_list = [build_graph(i) for i in range(len(dataset))]
-train_loader = DataLoader(data_list[:800], batch_size=BATCH_SIZE, shuffle=True)
-val_loader = DataLoader(data_list[800:], batch_size=BATCH_SIZE)
+train_loader = GeoDataLoader(data_list[:800], batch_size=BATCH_SIZE, shuffle=True)
+val_loader = GeoDataLoader(data_list[800:], batch_size=BATCH_SIZE)
 
+# Get input feature dimension from the first graph (should be 6 in our case: XYZ + One-Hot Identity)
 in_channels = data_list[0].x.shape[1]
 
+# Prepare the GNN, optmizer etc.
 model = GATAutoencoder(
     in_channels=in_channels,
     hidden_channels=HIDDEN_CHANNELS,
@@ -438,18 +440,19 @@ model = GATAutoencoder(
 ).to(device)
 optimizer = torch.optim.AdamW(model.parameters(), lr=LR)
 
+# Check for existence of checkpoint to resume/skip training
 if os.path.exists(CHECKPOINT_PATH):
     checkpoint = torch.load(CHECKPOINT_PATH)
     model.load_state_dict(checkpoint["model_state_dict"])
     optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
     start_epoch = checkpoint.get("epoch", 0)
-    print(f"Loaded checkpoint from epoch {start_epoch}. Skipping training.")
+    print(f"Loaded checkpoint from epoch {start_epoch}.")
 else:
     # Proceed with training from scratch
     start_epoch = 0
     print("No checkpoint found. Starting training from scratch.")
 
-# Simple Loop
+# Loop
 trained = False
 for epoch in range(start_epoch, EPOCHS):
     train_loss = train_epoch(model, train_loader, optimizer, device)
@@ -460,6 +463,7 @@ for epoch in range(start_epoch, EPOCHS):
         )
     trained = True
 
+# Save if we modified the model weights
 if trained:
     checkpoint = {
         "model_state_dict": model.state_dict(),
@@ -487,10 +491,6 @@ if trained:
 # Encoding:
 """
 Pass the entire IL dataset through the frozen GAE encoder.
-"""
-
-# Storage:
-"""
 Save the resulting embeddings as a new key in the dataset (HDF5/Zarr).
 """
 
@@ -541,12 +541,14 @@ def compute_and_store_embeddings(model, base_h5_path, output_h5_path):
     print(f"Embeddings computed and stored in {output_h5_path}")
 
 
+# Check for existence of the dataset, if not, compute and store them
 if not os.path.exists(EMBEDDINGS_H5_PATH):
     print(
         f"Embeddings H5 dataset {EMBEDDINGS_H5_PATH} not found. Computing and storing embeddings..."
     )
     compute_and_store_embeddings(model, REPLAYED_H5_PATH, EMBEDDINGS_H5_PATH)
 
+# Load on the same dataset, should work out of the box
 embeddings_dataset = ManiSkillTrajectoryDataset(EMBEDDINGS_H5_PATH)
 print(
     f"""Dataset lenght: {
@@ -554,25 +556,13 @@ print(
     }, i.e., number of episodes/trajectories * frames per episode (-> (priv_state, observation, action) 3-ple for training later"""
 )
 
-print("\n Dataset, 57-th frame")
-print_dict_tree(dataset[57])
-
-print("\n Embedding dataset, 57-th frame")
-print_dict_tree(embeddings_dataset[57])
+# Try it out
+print_dict_tree(embeddings_dataset[0])
 
 # Smoothing:
 """
 Verify temporal consistency of embeddings across trajectory frames.
 """
-
-
-def get_num_frames(json_path, episode_id):
-    with open(json_path, "r") as f:
-        data = json.load(f)
-    for episode in data["episodes"]:
-        if episode["episode_id"] == episode_id:
-            return episode["elapsed_steps"]
-    raise ValueError(f"Episode ID {episode_id} not found.")
 
 
 def get_all_episode_lengths(json_path):
@@ -607,17 +597,16 @@ def check_temporal_consistency(start_frame_idx, episode_length):
     print(f"Dissimilarity (First vs Last): {sim_extreme.item():.4f}")
 
 
+# Check temporal consistency for the first 5 episodes
 start_idx = 0
 episode_lengths = get_all_episode_lengths(EMBEDDINGS_JS_PATH)
-for i in range(1000):
+for i in range(5):
     print(f"\nEpisode {i}")
     episode_len = episode_lengths[i]
     check_temporal_consistency(start_idx, episode_len)
     start_idx += episode_len
 
 # Phase 4: Policy Training & Evaluation
-
-
 """
 State Input: Train an IL policy (BC) using a concatenated state:
 
@@ -627,3 +616,99 @@ Latent State: The GAE scene embedding z.
 
 Benchmarking: Compare the success rate of the Graph-State Policy against a baseline trained on raw, flat privileged coordinates.
 """
+
+
+# TODO: I should make these more complex, and understand its components
+class GraphStateBCPolicy(nn.Module):
+    def __init__(self, z_dim=16, proprio_dim=18, action_dim=4, hidden_dim=256):
+        super().__init__()
+        # A lightweight 3-layer MLP
+        self.mlp = nn.Sequential(
+            nn.Linear(z_dim + proprio_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, action_dim),
+        )
+
+    def forward(self, z, proprioception):
+        # Combine "Vision/Spatial" (z) with (proprioception)
+        x = torch.cat([z, proprioception], dim=-1)
+        return self.mlp(x)
+
+
+# TODO: Should understand better the use of z.size(0) on the total_loss
+def train_bc_epoch(model, loader, optimizer, device):
+    model.train()
+    total_loss = 0
+    for batch in loader:
+        z = batch["priv_states"]["embeddings"].to(device)
+        proprio = batch["priv_states"]["articulations"]["panda"][:, 7:25].to(device)
+
+        target_action = batch["action"].to(device)
+
+        optimizer.zero_grad()
+
+        # Forward pass
+        out = model(z, proprio)
+
+        # Loss
+        loss = F.mse_loss(out, target_action)
+
+        loss.backward()
+        optimizer.step()
+
+        # XXX: why?
+        total_loss += loss.item() * z.size(0)
+
+    return total_loss / len(loader.dataset)
+
+
+# TODO: here too
+@torch.no_grad()
+def validate_bc(model, loader, device):
+    model.eval()
+    total_loss = 0
+    for batch in loader:
+        z = batch["priv_states"]["embeddings"].to(device)
+        proprio = batch["priv_states"]["articulations"]["panda"][:, 7:25].to(device)
+        target_action = batch["action"].to(device)
+
+        # Forward pass
+        out = model(z, proprio)
+
+        # Loss
+        loss = F.mse_loss(out, target_action)
+        # XXX: why?
+        total_loss += loss.item() * z.size(0)
+
+    return total_loss / len(loader.dataset)
+
+
+train_size = int(0.8 * len(embeddings_dataset))
+val_size = len(embeddings_dataset) - train_size
+bc_train_dataset, bc_val_dataset = torch.utils.data.random_split(
+    embeddings_dataset, [train_size, val_size]
+)
+
+bc_train_loader = TorchDataLoader(bc_train_dataset, batch_size=BATCH_SIZE, shuffle=True)
+bc_val_loader = TorchDataLoader(bc_val_dataset, batch_size=BATCH_SIZE)
+
+policy = GraphStateBCPolicy(
+    z_dim=LATENT_CHANNELS, proprio_dim=18, action_dim=4, hidden_dim=256
+).to(device)
+
+bc_optimizer = torch.optim.AdamW(policy.parameters(), lr=LR)
+
+for epoch in range(1, EPOCHS + 1):
+    train_loss = train_bc_epoch(policy, bc_train_loader, bc_optimizer, device)
+    val_loss = validate_bc(policy, bc_val_loader, device)
+
+    if epoch % 1 == 0:
+        print(
+            f"BC Epoch {epoch:03d}, Train Action MSE: {train_loss:.5f}, Val Action MSE: {val_loss:.5f}"
+        )
+
+# now = datetime.now()
+# torch.save(policy.state_dict(), f"graph_state_bc_policy_{now.isoformat()}.pth")
+# print("\nPolicy Training Complete! Saved to disk.")

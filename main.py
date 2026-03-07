@@ -340,6 +340,7 @@ Ensure the embedding z is expressive enough to reconstruct the scene geometry ac
 
 
 # TODO: I should also implment a second head for reconstructing edge_index or A
+# TODO: I should also understand submodules, as well why we pass that batch stuff (see also why we can pass zeros later when generating the features)
 class GATAutoencoder(nn.Module):
     def __init__(self, in_channels, hidden_channels, latent_channels, heads=4):
         super().__init__()
@@ -493,10 +494,8 @@ Pass the entire IL dataset through the frozen GAE encoder.
 Save the resulting embeddings as a new key in the dataset (HDF5/Zarr).
 """
 
-# TODO: later
 
-
-def compute_and_store_embeddings(model, dataset, base_h5_path, output_h5_path):
+def compute_and_store_embeddings(model, base_h5_path, output_h5_path):
     """
     Copies the original HDF5 file and appends embeddings for each frame under each trajectory group.
     """
@@ -520,7 +519,7 @@ def compute_and_store_embeddings(model, dataset, base_h5_path, output_h5_path):
             num_frames = len(traj_group["env_states"]["actors"]["cube"])
             embeddings = []
             for frame in tqdm(range(num_frames), desc=f"Processing {traj_name}"):
-                graph = build_graph(idx)
+                graph = build_graph(idx + frame)
                 graph = graph.to(device)
                 model.eval()
                 with torch.no_grad():
@@ -541,7 +540,7 @@ if not os.path.exists(EMBEDDINGS_H5_PATH):
     print(
         f"Embeddings H5 dataset {EMBEDDINGS_H5_PATH} not found. Computing and storing embeddings..."
     )
-    compute_and_store_embeddings(model, dataset, REPLAYED_H5_PATH, EMBEDDINGS_H5_PATH)
+    compute_and_store_embeddings(model, REPLAYED_H5_PATH, EMBEDDINGS_H5_PATH)
 
 embeddings_dataset = ManiSkillTrajectoryDataset(EMBEDDINGS_H5_PATH)
 print(

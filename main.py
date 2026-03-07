@@ -9,6 +9,7 @@
 
 import os
 from datetime import datetime
+import json
 
 from typing import Union
 import h5py
@@ -487,42 +488,6 @@ if trained:
 Pass the entire IL dataset through the frozen GAE encoder.
 """
 
-
-def get_embedding(idx):
-    return model.encode(
-        data_list[idx].x.to(device),
-        data_list[idx].edge_index.to(device),
-        torch.zeros(data_list[idx].x.shape[0], dtype=torch.long).to(device),
-    )
-
-
-class EmbeddingDataset(torch.utils.data.Dataset):
-    def __init__(self, base_dataset, model, device):
-        self.base_dataset = base_dataset
-        self.model = model
-        self.device = device
-
-    def __len__(self):
-        return len(self.base_dataset)
-
-    def __getitem__(self, idx):
-        sample = self.base_dataset[idx]
-        # Build graph from priv_states
-        graph = build_graph(idx)
-        graph = graph.to(self.device)
-        self.model.eval()
-        with torch.no_grad():
-            embedding = self.model.encode(
-                graph.x,
-                graph.edge_index,
-                torch.zeros(graph.x.shape[0], dtype=torch.long, device=self.device),
-            )
-        sample["embedding"] = embedding.cpu().numpy()
-        return sample
-
-
-embedding_dataset = EmbeddingDataset(dataset, model, device)
-
 # Storage:
 """
 Save the resulting embeddings as a new key in the dataset (HDF5/Zarr).
@@ -591,11 +556,26 @@ print_dict_tree(embeddings_dataset[999])
 Verify temporal consistency of embeddings across trajectory frames.
 """
 
-episode_lengths = []
-with h5py.File(REPLAYED_H5_PATH, "r") as f:
-    for traj_name in f.keys():
-        num_frames = len(f[traj_name]["env_states"]["actors"]["cube"])
-        episode_lengths.append(num_frames)
+# episode_lengths = []
+# with h5py.File(REPLAYED_H5_PATH, "r") as f:
+#    for traj_name in f.keys():
+#        num_frames = len(f[traj_name]["env_states"]["actors"]["cube"])
+#        episode_lengths.append(num_frames)
+
+
+def get_num_frames(json_path, episode_id):
+    with open(json_path, "r") as f:
+        data = json.load(f)
+    for episode in data["episodes"]:
+        if episode["episode_id"] == episode_id:
+            return episode["elapsed_steps"]
+    raise ValueError(f"Episode ID {episode_id} not found.")
+
+
+def get_all_episode_lengths(json_path):
+    with open(json_path, "r") as f:
+        data = json.load(f)
+    return [ep["elapsed_steps"] for ep in data["episodes"]]
 
 
 def compute_trajectory_embeddings_similarity(trajectory_embeddings):
@@ -604,33 +584,32 @@ def compute_trajectory_embeddings_similarity(trajectory_embeddings):
     z_next = trajectory_embeddings[1:]
 
     # Calculate similarity between adjacent frames
-    sim = F.cosine_similarity(z_t, z_next, dim=-1)
-    dissim = F.cosine_similarity(
+    sim_scores = F.cosine_similarity(z_t, z_next, dim=-1)
+    sim_extreme = F.cosine_similarity(
         trajectory_embeddings[0], trajectory_embeddings[-1], dim=-1
     )
 
-    return sim, dissim
+    return sim_scores, sim_extreme
+
+
+episode_lengths = get_all_episode_lengths(EMBEDDINGS_JS_PATH)
 
 
 def check_temporal_consistency(episode_idx):
-    episodes = np.array(
-        [embedding_dataset[i]["embedding"] for i in range(episode_lengths[episode_idx])]
-    ).squeeze(1)
+    episode = embeddings_dataset[episode_idx : episode_lengths[episode_idx]]
+    embeddings = torch.tensor(episode["priv_states"]["embeddings"])
 
-    similarity_scores, dissimilarity_score = compute_trajectory_embeddings_similarity(
-        torch.tensor(episodes)
-    )
+    sim_scores, sim_extreme = compute_trajectory_embeddings_similarity(embeddings)
 
-    print(f"Mean Temporal Similarity: {similarity_scores.mean().item():.4f}")
-    print(f"Min Temporal Similarity: {similarity_scores.min().item():.4f}")
-    print(f"Max Temporal Similarity: {similarity_scores.max().item():.4f}")
-    print(f"Dissimilarity (First vs Last): {dissimilarity_score.item():.4f}")
+    print(f"Mean Temporal Similarity: {sim_scores.mean().item():.4f}")
+    print(f"Min Temporal Similarity: {sim_scores.min().item():.4f}")
+    print(f"Max Temporal Similarity: {sim_scores.max().item():.4f}")
+    print(f"Dissimilarity (First vs Last): {sim_extreme.item():.4f}")
 
 
 for i in range(1000):
-    print("Episode", i)
+    print("\nEpisode", i)
     check_temporal_consistency(i)
-    print()
 
 # Phase 4: Policy Training & Evaluation
 

@@ -262,7 +262,7 @@ def print_dict_tree(data, indent=""):
 #           So we rather reduce coordinates of such hinged actors by taking a root (usually the 000 coordinate or the base)
 #           bringing 13 dimensions (just as before) and joint position (1) + joint velocity (1) for each hinged actor (7+2)
 #           so we get 13 + 9*(2) = 13 + 18 = 31
-print_dict_tree(dataset[999])
+print_dict_tree(dataset[0])
 print()
 print("-" * 64)
 print()
@@ -548,18 +548,17 @@ print(
         len(dataset)
     }, i.e., number of episodes/trajectories * frames per episode (-> (priv_state, observation, action) 3-ple for training later"""
 )
-print_dict_tree(embeddings_dataset[999])
+
+print("\n Dataset, 57-th frame")
+print_dict_tree(dataset[57])
+
+print("\n Embedding dataset, 57-th frame")
+print_dict_tree(embeddings_dataset[57])
 
 # Smoothing:
 """
 Verify temporal consistency of embeddings across trajectory frames.
 """
-
-# episode_lengths = []
-# with h5py.File(REPLAYED_H5_PATH, "r") as f:
-#    for traj_name in f.keys():
-#        num_frames = len(f[traj_name]["env_states"]["actors"]["cube"])
-#        episode_lengths.append(num_frames)
 
 
 def get_num_frames(json_path, episode_id):
@@ -591,23 +590,23 @@ def compute_trajectory_embeddings_similarity(trajectory_embeddings):
     return sim_scores, sim_extreme
 
 
-episode_lengths = get_all_episode_lengths(EMBEDDINGS_JS_PATH)
-
-
 def check_temporal_consistency(episode_idx):
-    episode = embeddings_dataset[episode_idx : episode_lengths[episode_idx]]
+    episode = embeddings_dataset[
+        episode_idx : episode_idx + episode_lengths[episode_idx]
+    ]
     embeddings = torch.tensor(episode["priv_states"]["embeddings"])
 
     sim_scores, sim_extreme = compute_trajectory_embeddings_similarity(embeddings)
 
+    print("\nEpisode", episode_idx)
     print(f"Mean Temporal Similarity: {sim_scores.mean().item():.4f}")
     print(f"Min Temporal Similarity: {sim_scores.min().item():.4f}")
     print(f"Max Temporal Similarity: {sim_scores.max().item():.4f}")
     print(f"Dissimilarity (First vs Last): {sim_extreme.item():.4f}")
 
 
+episode_lengths = get_all_episode_lengths(EMBEDDINGS_JS_PATH)
 for i in range(1000):
-    print("\nEpisode", i)
     check_temporal_consistency(i)
 
 # Phase 4: Policy Training & Evaluation

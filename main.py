@@ -14,7 +14,6 @@ from pathlib import Path
 from datetime import datetime
 from tqdm import tqdm
 
-
 import numpy as np
 import h5py
 
@@ -53,16 +52,20 @@ home = Path.home()
 cwd = Path.cwd()
 script_location = Path(__file__).resolve().parent
 
+# Suppose a unix-like environment (I have no idea about Windows)
 DS_PATH = home / ".maniskill/demos/PickCube-v1/motionplanning/"
 
+# Paths to the datasets (H5)
 H5_PATH = DS_PATH / "trajectory.h5"
 REPLAYED_H5_PATH = DS_PATH / "trajectory.state.pd_ee_delta_pos.physx_cpu.h5"
 EMBEDDINGS_H5_PATH = REPLAYED_H5_PATH.with_suffix(".embeddings.h5")
 
+# And related json metadata
 JS_PATH = DS_PATH / "trajectory.json"
 REPLAYED_JS_PATH = DS_PATH / "trajectory.state.pd_ee_delta_pos.physx_cpu.json"
 EMBEDDINGS_JS_PATH = REPLAYED_JS_PATH.with_suffix(".embeddings.json")
 
+# These are to load/save checkpoints
 GAT_CHECKPOINT_PATH = (
     script_location / "gatautoencoder_checkpoint_E50_2026-03-06T16:28:41.304114.pth"
 )

@@ -13,6 +13,7 @@ from typing import Union
 from pathlib import Path
 from datetime import datetime
 from tqdm import tqdm
+import itertools
 
 import numpy as np
 import h5py
@@ -68,10 +69,10 @@ EMBEDDINGS_JS_PATH = REPLAYED_JS_PATH.with_suffix(".embeddings.json")
 
 # These are to load/save checkpoints
 GAT_CHECKPOINT_PATH = (
-    script_location / "gatautoencoder_checkpoint_E4_2026-03-08T16:22:31.728025.pth"
+    script_location / "gatautoencoder_checkpoint_E4_2026-03-08T21:18:08.946347.pth"
 )
 BC_CHECKPOINT_PATH = (
-    script_location / "bc_policy_checkpoint_E49_2026-03-08T16:25:45.109680.pth"
+    script_location / "bc_policy_checkpoint_E19_2026-03-08T19:18:49.445646.pth"
 )
 
 # Generic Hyperparameters
@@ -83,7 +84,7 @@ GAT_LR = 1e-3
 GAT_BATCH_SIZE = 64
 GAT_HIDDEN_CHANNELS = 32
 GAT_ATTENTION_HEADS = 4
-GAT_LATENT_CHANNELS = 6
+GAT_LATENT_CHANNELS = 8
 
 # BC Hyperparameters
 BC_EPOCHS = 20
@@ -298,6 +299,10 @@ def print_dict_tree(data, indent=""):
             print(f"{indent}{branch}{key}: {type(value).__name__}")
 
 
+# ** Priviledge states **
+#
+# Note that `env_states` is simply a direct memory dump from the underlying SAPIENS engine
+#
 # Actors: 13 dimensions for position + quaternon + velocity + angular_velocity
 # Articulations: 31 dimensions for position + quaternon + velocity + angular_velocity of root state + joints
 #
@@ -334,6 +339,33 @@ def print_dict_tree(data, indent=""):
 #       https://maniskill.readthedocs.io/en/latest/_modules/mani_skill/utils/structs/actor.html
 #       https://maniskill.readthedocs.io/en/latest/_modules/mani_skill/utils/structs/articulation.html
 
+# ** Observations **
+#
+# Note that SAPIENS tracks the world using the absolute minimum variables required to calculate collisions and gravity
+# For this reason The "Hand" (or Tool Center Point - TCP) is not a physics object tracked.
+# It is an imaginary geometric point floating between the two gripper fingers.
+# To find out where the hand actually is in 3D space, you have to run Forward Kinematics—multiplying all 9 joint angles through a complex kinematic tree.
+# ManiSkill's know that every researcher needs the Hand XYZ, so the environment automatically runs that math for you on every frame and injects the result into the obs array
+#
+#   Indices,    Size,   Description
+#
+#   [0:9],      9,      qpos: Joint Angles (7 arm joints + 2 gripper fingers) -> SAME AS ENV_STATE
+#   [9:18],     9,      qvel: Joint Velocities -> SAME AS ENV_STATE
+#   [18:21],    3,      "tcp_pose (Position): Hand X, Y, Z"
+#   [21:25],    4,      "tcp_pose (Quaternion): Hand W, X, Y, Z"
+#   [25:42],    17,     "Task-specific data (Cube pose, Goal pose, distances, etc.)"
+#
+# Indeed, we can run
+# data = h5py.File(REPLAYED_H5_PATH, "r")
+#
+# Get Frame 0, then slice features 13 to 31
+# print(data["traj_0"]["env_states"]["articulations"]["panda"][0, 13:31])
+#
+# Get Frame 0, then slice features 0 to 18
+# print(data["traj_0"]["obs"][0, 0:18])
+#
+# And they will be identical
+
 print_dict_tree(dataset[0])
 
 # Graph Construction:
@@ -369,27 +401,49 @@ Implementation: Build a preprocessing script to convert flat state vectors into 
 # action space ([-1, 1]) in Franka Emilia Panda robot, except arm_pd_joint_pos and arm_pd_joint_pos_vel
 
 
-# TODO: I can also add other nodes and make a more complex graph, as well adding euclidean distance as edge weights
 def build_graph(idx):
     priv_states = dataset[idx]["priv_states"]
+    obs = dataset[idx]["obs"]
 
+    # Extract XYZ for the nodes
     cube_xyz = priv_states["actors"]["cube"][:3]
     goal_xyz = priv_states["actors"]["goal_site"][:3]
-    hand_xyz = priv_states["articulations"]["panda"][:3]
+    table_xyz = priv_states["actors"]["table-workspace"][:3]
+    base_xyz = priv_states["articulations"]["panda"][:3]
 
-    # Append One-Hot Identity: [X, Y, Z, is_cube, is_goal, is_hand]
-    cube_x = np.concatenate([cube_xyz, [1, 0, 0]])
-    goal_x = np.concatenate([goal_xyz, [0, 1, 0]])
-    hand_x = np.concatenate([hand_xyz, [0, 0, 1]])
+    # TCP is not available in the SAPIENS data, so we need to retrive it from obs
+    hand_xyz = obs[18:21]
 
-    # Nodes (X) has shape [3, 6]
-    x = torch.tensor(np.array([cube_x, goal_x, hand_x]), dtype=torch.float)
+    # Build One-Hot Identities
+    identities = np.eye(5)
 
-    edge_index = torch.tensor(
-        [[0, 0, 1, 1, 2, 2], [1, 2, 0, 2, 0, 1]], dtype=torch.long
-    )
+    # Concatenate XYZ with Identities -> Shape: [5 nodes, 8 features]
+    nodes_list = [
+        np.concatenate([cube_xyz, identities[0]]),
+        np.concatenate([goal_xyz, identities[1]]),
+        np.concatenate([table_xyz, identities[2]]),
+        np.concatenate([base_xyz, identities[3]]),
+        np.concatenate([hand_xyz, identities[4]]),
+    ]
+    x = torch.tensor(np.array(nodes_list), dtype=torch.float)
 
-    return Data(x=x, edge_index=edge_index)
+    # Generate fully connected graph
+    # NOTE: Could also enforce some arbitrary structue myself, e.g., workbanch is connected only to root and cube
+    edges = list(itertools.permutations(range(5), 2))
+    edge_index = torch.tensor(edges, dtype=torch.long).t().contiguous()
+
+    # Calculate Euclidean Distances for Edge Weights
+    # Get the XYZ coordinates for the source (row) and target (col) of each edge
+    row, col = edge_index
+    src_xyz = x[row, :3]
+    dst_xyz = x[col, :3]
+
+    # Calculate the L2 Norm (Euclidean distance) between them
+    distances = torch.linalg.vector_norm(src_xyz - dst_xyz, ord=2, dim=1)
+    distances = distances.view(-1, 1)
+
+    # Return the graph
+    return Data(x=x, edge_index=edge_index, edge_attr=distances)
 
 
 # Try it out
@@ -409,32 +463,34 @@ Ensure the embedding z is expressive enough to reconstruct the scene geometry ac
 """
 
 
-# TODO: I could also implment a second head for reconstructing edge_index or A
-#
 # TODO: I should understand GNNs in general, as well why we pass that batch stuff
 #   --> see also why we pass zeros later when generating the features
+# NOTE: I could also implment a second head for reconstructing edge_index or A
 class GATAutoencoder(nn.Module):
     def __init__(self, in_channels, hidden_channels, latent_channels, heads):
         super().__init__()
+
         # XXX: ENCODER: Maps 6 dims -> hidden
-        self.encoder_conv1 = GATConv(in_channels, hidden_channels, heads=heads)
+        self.encoder_conv1 = GATConv(
+            in_channels, hidden_channels, heads=heads, edge_dim=1
+        )
         self.encoder_conv2 = GATConv(
-            hidden_channels * heads, latent_channels, heads=1, concat=False
+            hidden_channels * heads, latent_channels, heads=1, concat=False, edge_dim=1
         )
 
         # DECODER: Takes the GLOBAL latent vector + Node Identity -> Reconstructs XYZ
         # Input to decoder: latent_channels (e.g., 16) + 3 (identity) = 19
         self.decoder = nn.Sequential(
-            nn.Linear(latent_channels + 3, hidden_channels),
+            nn.Linear(latent_channels + 5, hidden_channels),
             nn.ReLU(),
             # We only want to predict the 3 XYZ coords
             nn.Linear(hidden_channels, 3),
         )
 
-    def encode(self, x, edge_index, batch):
-        x = self.encoder_conv1(x, edge_index)
+    def encode(self, x, edge_index, edge_attr, batch):
+        x = self.encoder_conv1(x, edge_index, edge_attr)
         x = F.elu(x)
-        node_z = self.encoder_conv2(x, edge_index)
+        node_z = self.encoder_conv2(x, edge_index, edge_attr)
 
         # XXX: Pool all nodes in the graph into ONE vector z (bottleneck)
         global_z = global_mean_pool(node_z, batch)
@@ -442,12 +498,12 @@ class GATAutoencoder(nn.Module):
 
     def forward(self, data):
         # Encode to a single scene vector [BatchSize, latent_channels]
-        global_z = self.encode(data.x, data.edge_index, data.batch)
+        global_z = self.encode(data.x, data.edge_index, data.edge_attr, data.batch)
 
         # To decode, we expand the global vector back to all nodes
         z_expanded = global_z[data.batch]
 
-        # XXX: Give the decoder the Scene Context (z) AND the Node Identity (last 3 columns of x)
+        # XXX: Give the decoder the encoded latent vector (z) and the node identities (values of x after the first 3 columns)
         identities = data.x[:, 3:]
         dec_input = torch.cat([z_expanded, identities], dim=-1)
 
@@ -651,6 +707,7 @@ def compute_and_store_embeddings(model, base_h5_path, output_h5_path):
                     emb = model.encode(
                         graph.x,
                         graph.edge_index,
+                        graph.edge_attr,
                         torch.zeros(
                             graph.x.shape[0], dtype=torch.long, device=graph.x.device
                         ),
@@ -700,6 +757,7 @@ def compute_trajectory_embeddings_similarity(trajectory_embeddings):
     return sim_scores, sim_extreme
 
 
+# NOTE: Could as well check via graphs and other measures, but for now I go for this one here
 def check_temporal_consistency(start_frame_idx, episode_length):
     episode = embeddings_dataset[start_frame_idx : start_frame_idx + episode_length]
     embeddings = torch.tensor(episode["priv_states"]["embeddings"])
@@ -707,9 +765,6 @@ def check_temporal_consistency(start_frame_idx, episode_length):
     sim_scores, sim_extreme = compute_trajectory_embeddings_similarity(embeddings)
 
     print(f"Mean Temporal Similarity: {sim_scores.mean().item():.4f}")
-    print(f"Min Temporal Similarity: {sim_scores.min().item():.4f}")
-    print(f"Max Temporal Similarity: {sim_scores.max().item():.4f}")
-    print(f"Dissimilarity (First vs Last): {sim_extreme.item():.4f}")
 
 
 # Check temporal consistency for the first 5 episodes (cosine similarity over subsequent frames' embeddings)
@@ -737,7 +792,7 @@ Benchmarking: Compare the success rate of the Graph-State Policy against a basel
 """
 
 
-# TODO: I could make this architecture more complex
+# NOTE: I could make this architecture more complex
 # TODO: Comparison with baseline is still missing, see [ManiSkill documentation](https://maniskill.readthedocs.io/en/latest/user_guide/learning_from_demos/baselines.html)
 class GraphStateBCPolicy(nn.Module):
     """A lightweight MLP to predict actions sequentially"""

@@ -38,10 +38,6 @@ home = Path.home()
 cwd = Path.cwd()
 script_location = Path(__file__).resolve().parent
 
-print(home)
-print(cwd)
-print(script_location)
-
 DS_PATH = home / ".maniskill/demos/PickCube-v1/motionplanning/"
 
 H5_PATH = DS_PATH / "trajectory.h5"
@@ -55,12 +51,24 @@ EMBEDDINGS_JS_PATH = REPLAYED_JS_PATH.with_suffix(".embeddings.json")
 CHECKPOINT_PATH = (
     script_location / "gatautoencoder_checkpoint_E50_2026-03-06T16:28:41.304114.pth"
 )
+BC_CHECKPOINT_PATH = (
+    script_location / "bc_policy_checkpoint_E50_2026-03-07T17:34:46.051669.pth"
+)
+
+SPLIT_RATIO = 0.8
 
 EPOCHS = 50
 LR = 1e-3
 BATCH_SIZE = 32
 HIDDEN_CHANNELS = 32
 LATENT_CHANNELS = 16
+
+ACTION_DIM = 4
+PROPRIO_DIM = 18
+HIDDEN_DIM = 256
+BC_EPOCHS = 50
+BC_LR = 1e-3
+BC_BATCH_SIZE = 32
 
 # Phase 1: Scene Graph Engineering
 
@@ -438,8 +446,20 @@ print(f"Working on {device}")
 
 # Create a list of Data objects using build_graph function
 data_list = [build_graph(i) for i in range(len(dataset))]
-train_loader = GeoDataLoader(data_list[:800], batch_size=BATCH_SIZE, shuffle=True)
-val_loader = GeoDataLoader(data_list[800:], batch_size=BATCH_SIZE)
+
+# FIXME: Beware of data leakage: I should rather split over episodes, not frames themselves
+# In a simulation, Frame 45 and Frame 46 of the same episode are 99.9% identical
+# If random splitting puts Frame 45 in your Train Set and Frame 46 in your Validation Set, your Validation MSE will drop to near zero
+# Train Set: Episodes 0 to 800 (contains all their frames)
+# Validation Set: Episodes 800 to 1000 (contains all their frames)
+train_size = int(SPLIT_RATIO * len(data_list))
+val_size = len(data_list) - train_size
+train_dataset, val_dataset = torch.utils.data.random_split(
+    data_list, [train_size, val_size]
+)
+
+train_loader = GeoDataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
+val_loader = GeoDataLoader(val_dataset, batch_size=BATCH_SIZE)
 
 # Get input feature dimension from the first graph (should be 6 in our case: XYZ + One-Hot Identity)
 in_channels = data_list[0].x.shape[1]
@@ -698,30 +718,71 @@ def validate_bc(model, loader, device):
     return total_loss / len(loader.dataset)
 
 
-train_size = int(0.8 * len(embeddings_dataset))
+# FIXME: Beware of data leakage: I should rather split over episodes, not frames themselves
+# In a simulation, Frame 45 and Frame 46 of the same episode are 99.9% identical
+# If random splitting puts Frame 45 in your Train Set and Frame 46 in your Validation Set, your Validation MSE will drop to near zero
+# Train Set: Episodes 0 to 800 (contains all their frames)
+# Validation Set: Episodes 800 to 1000 (contains all their frames)
+train_size = int(SPLIT_RATIO * len(embeddings_dataset))
 val_size = len(embeddings_dataset) - train_size
 bc_train_dataset, bc_val_dataset = torch.utils.data.random_split(
     embeddings_dataset, [train_size, val_size]
 )
 
-bc_train_loader = TorchDataLoader(bc_train_dataset, batch_size=BATCH_SIZE, shuffle=True)
-bc_val_loader = TorchDataLoader(bc_val_dataset, batch_size=BATCH_SIZE)
+bc_train_loader = TorchDataLoader(
+    bc_train_dataset, batch_size=BC_BATCH_SIZE, shuffle=True
+)
+bc_val_loader = TorchDataLoader(bc_val_dataset, batch_size=BC_BATCH_SIZE)
 
 policy = GraphStateBCPolicy(
-    z_dim=LATENT_CHANNELS, proprio_dim=18, action_dim=4, hidden_dim=256
+    z_dim=LATENT_CHANNELS,
+    proprio_dim=PROPRIO_DIM,
+    action_dim=ACTION_DIM,
+    hidden_dim=HIDDEN_DIM,
 ).to(device)
 
-bc_optimizer = torch.optim.AdamW(policy.parameters(), lr=LR)
+bc_optimizer = torch.optim.AdamW(policy.parameters(), lr=BC_LR)
 
-for epoch in range(1, EPOCHS + 1):
+if BC_CHECKPOINT_PATH.exists():
+    bc_checkpoint = torch.load(BC_CHECKPOINT_PATH)
+    policy.load_state_dict(checkpoint["model_state_dict"])
+    bc_optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+    start_epoch = checkpoint.get("epoch", 0)
+    print(f"Loaded BC checkpoint from epoch {start_epoch}.")
+else:
+    # Proceed with training from scratch
+    start_epoch = 0
+    print("No BC checkpoint found. Starting training from scratch.")
+
+trained = False
+for epoch in range(start_epoch, BC_EPOCHS):
     train_loss = train_bc_epoch(policy, bc_train_loader, bc_optimizer, device)
     val_loss = validate_bc(policy, bc_val_loader, device)
-
     if epoch % 1 == 0:
         print(
             f"BC Epoch {epoch:03d}, Train Action MSE: {train_loss:.5f}, Val Action MSE: {val_loss:.5f}"
         )
+    trained = True
 
-# now = datetime.now()
-# torch.save(policy.state_dict(), f"graph_state_bc_policy_{now.isoformat()}.pth")
-# print("\nPolicy Training Complete! Saved to disk.")
+if trained:
+    checkpoint = {
+        "model_state_dict": policy.state_dict(),
+        "optimizer_state_dict": bc_optimizer.state_dict(),
+        "epoch": epoch,
+        "train_loss": train_loss,
+        "val_loss": val_loss,
+        "hyperparameters": {
+            "z_dim": LATENT_CHANNELS,
+            "proprio_dim": PROPRIO_DIM,
+            "action_dim": ACTION_DIM,
+            "hidden_dim": HIDDEN_DIM,
+            "batch_size": BC_BATCH_SIZE,
+            "lr": BC_LR,
+            "epochs": BC_EPOCHS,
+        },
+    }
+
+    # Get current timestamp (seconds since epoch)
+    now = datetime.now()
+    torch.save(checkpoint, f"bc_policy_checkpoint_E{epoch}_{now.isoformat()}.pth")
+    print(f"Saved checkpoint at epoch {epoch} with timestamp {now.isoformat()}")

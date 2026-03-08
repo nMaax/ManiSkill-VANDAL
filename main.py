@@ -74,19 +74,20 @@ BC_CHECKPOINT_PATH = (
 SPLIT_RATIO = 0.8
 
 # GNN Hyperparameters
-GAT_EPOCHS = 50
+GAT_EPOCHS = 5
 GAT_LR = 1e-3
-GAT_BATCH_SIZE = 32
+GAT_BATCH_SIZE = 64
 GAT_HIDDEN_CHANNELS = 32
-GAT_LATENT_CHANNELS = 16
+GAT_ATTENTION_HEADS = 4
+GAT_LATENT_CHANNELS = 6
 
 # BC Hyperparameters
-BC_ACTION_DIM = 4
-BC_PROPRIO_DIM = 18
-BC_HIDDEN_DIM = 256
 BC_EPOCHS = 50
 BC_LR = 1e-3
-BC_BATCH_SIZE = 32
+BC_BATCH_SIZE = 64
+BC_ACTION_DIM = 4
+BC_PROPRIO_DIM = 18
+BC_HIDDEN_DIM = 64
 
 # Phase 1: Scene Graph Engineering
 
@@ -377,7 +378,7 @@ Ensure the embedding z is expressive enough to reconstruct the scene geometry ac
 # TODO: I should also implment a second head for reconstructing edge_index or A
 # TODO: I should also understand submodules, as well why we pass that batch stuff (see also why we can pass zeros later when generating the features)
 class GATAutoencoder(nn.Module):
-    def __init__(self, in_channels, hidden_channels, latent_channels, heads=4):
+    def __init__(self, in_channels, hidden_channels, latent_channels, heads):
         super().__init__()
         # XXX: ENCODER: Maps 6 dims -> hidden
         self.encoder_conv1 = GATConv(in_channels, hidden_channels, heads=heads)
@@ -463,19 +464,31 @@ def validate(model, loader, device):
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Working on {device}")
 
-# Create a list of Data objects using build_graph function
-data_list = [build_graph(i) for i in range(len(dataset))]
 
-# FIXME: Beware of data leakage: I should rather split over episodes, not frames themselves
+def get_all_episode_lengths(json_path):
+    with open(json_path, "r") as f:
+        data = json.load(f)
+    return [ep["elapsed_steps"] for ep in data["episodes"]]
+
+
+episode_lengths = get_all_episode_lengths(REPLAYED_JS_PATH)
+
+
+# XXX: Beware of data leakage: I should split over episodes, not frames themselves
 # In a simulation, Frame 45 and Frame 46 of the same episode are 99.9% identical
 # If random splitting puts Frame 45 in your Train Set and Frame 46 in your Validation Set, your Validation MSE will drop to near zero
 # Train Set: Episodes 0 to 800 (contains all their frames)
 # Validation Set: Episodes 800 to 1000 (contains all their frames)
-train_size = int(SPLIT_RATIO * len(data_list))
-val_size = len(data_list) - train_size
-train_dataset, val_dataset = torch.utils.data.random_split(
-    data_list, [train_size, val_size]
-)
+episode_lengths = get_all_episode_lengths(JS_PATH)
+num_train_episodes = int(SPLIT_RATIO * len(episode_lengths))
+split_idx = sum(episode_lengths[:num_train_episodes])
+print(f"Splitting data for the GAT at {split_idx}")
+
+# Create a list of Data objects using build_graph function
+data_list = [build_graph(i) for i in range(len(dataset))]
+
+train_dataset = data_list[:split_idx]
+val_dataset = data_list[split_idx:]
 
 train_loader = GeoDataLoader(train_dataset, batch_size=GAT_BATCH_SIZE, shuffle=True)
 val_loader = GeoDataLoader(val_dataset, batch_size=GAT_BATCH_SIZE)
@@ -488,6 +501,7 @@ model = GATAutoencoder(
     in_channels=in_channels,
     hidden_channels=GAT_HIDDEN_CHANNELS,
     latent_channels=GAT_LATENT_CHANNELS,
+    heads=GAT_ATTENTION_HEADS,
 ).to(device)
 optimizer = torch.optim.AdamW(model.parameters(), lr=GAT_LR)
 
@@ -619,12 +633,6 @@ Verify temporal consistency of embeddings across trajectory frames.
 """
 
 
-def get_all_episode_lengths(json_path):
-    with open(json_path, "r") as f:
-        data = json.load(f)
-    return [ep["elapsed_steps"] for ep in data["episodes"]]
-
-
 def compute_trajectory_embeddings_similarity(trajectory_embeddings):
     # trajectory_embeddings shape: [T, 16]
     z_t = trajectory_embeddings[:-1]
@@ -653,7 +661,6 @@ def check_temporal_consistency(start_frame_idx, episode_length):
 
 # Check temporal consistency for the first 5 episodes
 start_idx = 0
-episode_lengths = get_all_episode_lengths(EMBEDDINGS_JS_PATH)
 for i in range(5):
     print(f"\nEpisode {i}")
     episode_len = episode_lengths[i]
@@ -679,7 +686,7 @@ Benchmarking: Compare the success rate of the Graph-State Policy against a basel
 
 # TODO: I should make these more complex, and understand its components
 class GraphStateBCPolicy(nn.Module):
-    def __init__(self, z_dim=16, proprio_dim=18, action_dim=4, hidden_dim=256):
+    def __init__(self, z_dim, proprio_dim, action_dim, hidden_dim):
         super().__init__()
         # A lightweight 3-layer MLP
         self.mlp = nn.Sequential(
@@ -744,16 +751,24 @@ def validate_bc(model, loader, device):
     return total_loss / len(loader.dataset)
 
 
-# FIXME: Beware of data leakage: I should rather split over episodes, not frames themselves
+# XXX: Beware of data leakage: I should split over episodes, not frames themselves
 # In a simulation, Frame 45 and Frame 46 of the same episode are 99.9% identical
 # If random splitting puts Frame 45 in your Train Set and Frame 46 in your Validation Set, your Validation MSE will drop to near zero
 # Train Set: Episodes 0 to 800 (contains all their frames)
 # Validation Set: Episodes 800 to 1000 (contains all their frames)
-train_size = int(SPLIT_RATIO * len(embeddings_dataset))
-val_size = len(embeddings_dataset) - train_size
-bc_train_dataset, bc_val_dataset = torch.utils.data.random_split(
-    embeddings_dataset, [train_size, val_size]
-)
+
+episode_lengths = get_all_episode_lengths(EMBEDDINGS_JS_PATH)
+num_train_episodes = int(SPLIT_RATIO * len(episode_lengths))
+split_idx = sum(episode_lengths[:num_train_episodes])
+print(f"Splitting data for the BC at {split_idx}")
+
+# Create index ranges for Train and Val
+train_indices = range(0, split_idx)
+val_indices = range(split_idx, len(embeddings_dataset))
+
+# Use Subset to cleanly split the dataset
+bc_train_dataset = torch.utils.data.Subset(embeddings_dataset, train_indices)
+bc_val_dataset = torch.utils.data.Subset(embeddings_dataset, val_indices)
 
 bc_train_loader = TorchDataLoader(
     bc_train_dataset, batch_size=BC_BATCH_SIZE, shuffle=True

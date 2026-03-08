@@ -47,3 +47,4 @@ htmlcov/
 
 # checkpoints
 *.pth
+*.pth.bak

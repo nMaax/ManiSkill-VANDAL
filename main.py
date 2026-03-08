@@ -7,33 +7,48 @@
 *   http://maniskill.readthedocs.io/en/latest/user_guide/learning_from_demos/index.html
 """
 
-import os
-from datetime import datetime
-import json
-from pathlib import Path
-
-from typing import Union
-import h5py
-import numpy as np
-from torch.utils.data import Dataset
-from tqdm import tqdm
 import shutil
+import json
+from typing import Union
+from pathlib import Path
+from datetime import datetime
+from tqdm import tqdm
 
-from mani_skill.utils.io_utils import load_json
-from mani_skill.utils import common
+
+import numpy as np
+import h5py
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.data import Dataset
 from torch.utils.data import DataLoader as TorchDataLoader
 
 from torch_geometric.nn import GATConv, global_mean_pool
 from torch_geometric.data import Data
 from torch_geometric.loader import DataLoader as GeoDataLoader
 
-torch.manual_seed(42)
+from mani_skill.utils.io_utils import load_json
+from mani_skill.utils import common
 
-# For proper path creation
+
+def seed_everything(seed: int) -> None:
+    r"""Sets the seed for generating random numbers in :pytorch:`PyTorch`,
+    :obj:`numpy` and :python:`Python`.
+
+    Args:
+        seed (int): The desired seed.
+    """
+    # random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
+
+# Seeding
+seed_everything(42)
+
+# For proper path generation
 home = Path.home()
 cwd = Path.cwd()
 script_location = Path(__file__).resolve().parent
@@ -48,38 +63,42 @@ JS_PATH = DS_PATH / "trajectory.json"
 REPLAYED_JS_PATH = DS_PATH / "trajectory.state.pd_ee_delta_pos.physx_cpu.json"
 EMBEDDINGS_JS_PATH = REPLAYED_JS_PATH.with_suffix(".embeddings.json")
 
-CHECKPOINT_PATH = (
+GAT_CHECKPOINT_PATH = (
     script_location / "gatautoencoder_checkpoint_E50_2026-03-06T16:28:41.304114.pth"
 )
 BC_CHECKPOINT_PATH = (
     script_location / "bc_policy_checkpoint_E50_2026-03-07T17:34:46.051669.pth"
 )
 
+# Generic Hyperparameters
 SPLIT_RATIO = 0.8
 
-EPOCHS = 50
-LR = 1e-3
-BATCH_SIZE = 32
-HIDDEN_CHANNELS = 32
-LATENT_CHANNELS = 16
+# GNN Hyperparameters
+GAT_EPOCHS = 50
+GAT_LR = 1e-3
+GAT_BATCH_SIZE = 32
+GAT_HIDDEN_CHANNELS = 32
+GAT_LATENT_CHANNELS = 16
 
-ACTION_DIM = 4
-PROPRIO_DIM = 18
-HIDDEN_DIM = 256
+# BC Hyperparameters
+BC_ACTION_DIM = 4
+BC_PROPRIO_DIM = 18
+BC_HIDDEN_DIM = 256
 BC_EPOCHS = 50
 BC_LR = 1e-3
 BC_BATCH_SIZE = 32
 
 # Phase 1: Scene Graph Engineering
 
+print("\n\n--- Phase 1: Data extraction ---")
+
 # Data Extraction:
 """
 Parse the privileged states from the IL dataset (e.g., object XYZ, bounding boxes, gripper pose).
 """
 
+
 # loads h5 data into memory for faster access
-
-
 def load_h5_data(data):
     out = dict()
     for k in data.keys():
@@ -284,9 +303,6 @@ def print_dict_tree(data, indent=""):
 #           bringing 13 dimensions (just as before) and joint position (1) + joint velocity (1) for each hinged actor (7+2)
 #           so we get 13 + 9*(2) = 13 + 18 = 31
 print_dict_tree(dataset[0])
-print()
-print("-" * 64)
-print()
 
 # Graph Construction:
 """
@@ -346,6 +362,9 @@ print(build_graph(0))
 
 
 # Phase 2: Representation Learning (The GAE)
+
+print("\n\n--- Phase 2: Representation Learning ---")
+
 
 # Architecture:
 """
@@ -458,8 +477,8 @@ train_dataset, val_dataset = torch.utils.data.random_split(
     data_list, [train_size, val_size]
 )
 
-train_loader = GeoDataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
-val_loader = GeoDataLoader(val_dataset, batch_size=BATCH_SIZE)
+train_loader = GeoDataLoader(train_dataset, batch_size=GAT_BATCH_SIZE, shuffle=True)
+val_loader = GeoDataLoader(val_dataset, batch_size=GAT_BATCH_SIZE)
 
 # Get input feature dimension from the first graph (should be 6 in our case: XYZ + One-Hot Identity)
 in_channels = data_list[0].x.shape[1]
@@ -467,14 +486,14 @@ in_channels = data_list[0].x.shape[1]
 # Prepare the GNN, optmizer etc.
 model = GATAutoencoder(
     in_channels=in_channels,
-    hidden_channels=HIDDEN_CHANNELS,
-    latent_channels=LATENT_CHANNELS,
+    hidden_channels=GAT_HIDDEN_CHANNELS,
+    latent_channels=GAT_LATENT_CHANNELS,
 ).to(device)
-optimizer = torch.optim.AdamW(model.parameters(), lr=LR)
+optimizer = torch.optim.AdamW(model.parameters(), lr=GAT_LR)
 
 # Check for existence of checkpoint to resume/skip training
-if CHECKPOINT_PATH.exists():
-    checkpoint = torch.load(CHECKPOINT_PATH)
+if GAT_CHECKPOINT_PATH.exists():
+    checkpoint = torch.load(GAT_CHECKPOINT_PATH)
     model.load_state_dict(checkpoint["model_state_dict"])
     optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
     start_epoch = checkpoint.get("epoch", 0)
@@ -486,7 +505,7 @@ else:
 
 # Loop
 trained = False
-for epoch in range(start_epoch, EPOCHS):
+for epoch in range(start_epoch, GAT_EPOCHS):
     train_loss = train_epoch(model, train_loader, optimizer, device)
     val_loss = validate(model, val_loader, device)
     if epoch % 1 == 0:
@@ -505,11 +524,11 @@ if trained:
         "val_loss": val_loss,
         "hyperparameters": {
             "in_channels": in_channels,
-            "hidden_channels": HIDDEN_CHANNELS,
-            "latent_channels": LATENT_CHANNELS,
-            "batch_size": BATCH_SIZE,
-            "lr": LR,
-            "epochs": EPOCHS,
+            "hidden_channels": GAT_HIDDEN_CHANNELS,
+            "latent_channels": GAT_LATENT_CHANNELS,
+            "batch_size": GAT_BATCH_SIZE,
+            "lr": GAT_LR,
+            "epochs": GAT_EPOCHS,
         },
     }
 
@@ -519,6 +538,9 @@ if trained:
     print(f"Saved checkpoint at epoch {epoch} with timestamp {now.isoformat()}")
 
 # Phase 3: Dataset Augmentation
+
+print("\n\n--- Phase 3: Dataset Augmentation ---")
+
 
 # Encoding:
 """
@@ -640,6 +662,10 @@ for i in range(5):
 print()
 
 # Phase 4: Policy Training & Evaluation
+
+print("\n\n--- Phase 4: Policy Training & Evaluation ---")
+
+
 """
 State Input: Train an IL policy (BC) using a concatenated state:
 
@@ -735,10 +761,10 @@ bc_train_loader = TorchDataLoader(
 bc_val_loader = TorchDataLoader(bc_val_dataset, batch_size=BC_BATCH_SIZE)
 
 policy = GraphStateBCPolicy(
-    z_dim=LATENT_CHANNELS,
-    proprio_dim=PROPRIO_DIM,
-    action_dim=ACTION_DIM,
-    hidden_dim=HIDDEN_DIM,
+    z_dim=GAT_LATENT_CHANNELS,
+    proprio_dim=BC_PROPRIO_DIM,
+    action_dim=BC_ACTION_DIM,
+    hidden_dim=BC_HIDDEN_DIM,
 ).to(device)
 
 bc_optimizer = torch.optim.AdamW(policy.parameters(), lr=BC_LR)
@@ -772,10 +798,10 @@ if trained:
         "train_loss": train_loss,
         "val_loss": val_loss,
         "hyperparameters": {
-            "z_dim": LATENT_CHANNELS,
-            "proprio_dim": PROPRIO_DIM,
-            "action_dim": ACTION_DIM,
-            "hidden_dim": HIDDEN_DIM,
+            "z_dim": GAT_LATENT_CHANNELS,
+            "proprio_dim": BC_PROPRIO_DIM,
+            "action_dim": BC_ACTION_DIM,
+            "hidden_dim": BC_HIDDEN_DIM,
             "batch_size": BC_BATCH_SIZE,
             "lr": BC_LR,
             "epochs": BC_EPOCHS,

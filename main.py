@@ -422,6 +422,7 @@ class GATAutoencoder(nn.Module):
 
 
 # TODO: should use more than 3 columns for training
+# NOTE: Consider that proprioception will be already present in the input data to the IL model later, maybe it is redundant here?
 def train_epoch(model, loader, optimizer, device):
     model.train()
     total_loss = 0
@@ -471,25 +472,30 @@ def get_all_episode_lengths(json_path):
     return [ep["elapsed_steps"] for ep in data["episodes"]]
 
 
+# Extract episodes lenghts from the json file and store it in a list
 episode_lengths = get_all_episode_lengths(REPLAYED_JS_PATH)
 
 
-# XXX: Beware of data leakage: I should split over episodes, not frames themselves
+# Beware of data leakage: I should split over episodes, not frames themselves
 # In a simulation, Frame 45 and Frame 46 of the same episode are 99.9% identical
 # If random splitting puts Frame 45 in your Train Set and Frame 46 in your Validation Set, your Validation MSE will drop to near zero
 # Train Set: Episodes 0 to 800 (contains all their frames)
 # Validation Set: Episodes 800 to 1000 (contains all their frames)
+
+# Create a list of Data objects using build_graph function
+data_list = [build_graph(i) for i in range(len(dataset))]
+
+# Extract splitting index over dataset (remind dataset is a flatten sequence of episode's frame, so we need to reconstruct the frame that divides the 80/20 of episodes)
 episode_lengths = get_all_episode_lengths(JS_PATH)
 num_train_episodes = int(SPLIT_RATIO * len(episode_lengths))
 split_idx = sum(episode_lengths[:num_train_episodes])
 print(f"Splitting data for the GAT at {split_idx}")
 
-# Create a list of Data objects using build_graph function
-data_list = [build_graph(i) for i in range(len(dataset))]
-
+# Split the data
 train_dataset = data_list[:split_idx]
 val_dataset = data_list[split_idx:]
 
+# Move it to dataloaders
 train_loader = GeoDataLoader(train_dataset, batch_size=GAT_BATCH_SIZE, shuffle=True)
 val_loader = GeoDataLoader(val_dataset, batch_size=GAT_BATCH_SIZE)
 
@@ -565,7 +571,7 @@ Save the resulting embeddings as a new key in the dataset (HDF5/Zarr).
 
 def compute_and_store_embeddings(model, base_h5_path, output_h5_path):
     """
-    Copies the original HDF5 file and appends embeddings for each frame under each trajectory group.
+    Copies the original HDF5 file and appends embeddings for each frame under each  group.
     """
     if base_h5_path.exists():
         shutil.copy(base_h5_path, output_h5_path)
@@ -609,14 +615,14 @@ def compute_and_store_embeddings(model, base_h5_path, output_h5_path):
     print(f"Embeddings computed and stored in {output_h5_path}")
 
 
-# Check for existence of the dataset, if not, compute and store them
+# Check for existence of the embeddings dataset, if not, compute and store it
 if not EMBEDDINGS_H5_PATH.exists():
     print(
         f"Embeddings H5 dataset {EMBEDDINGS_H5_PATH} not found. Computing and storing embeddings..."
     )
     compute_and_store_embeddings(model, REPLAYED_H5_PATH, EMBEDDINGS_H5_PATH)
 
-# Load on the same dataset, should work out of the box
+# Load on the same dataset, should work out of the box with the class made on top of the file
 embeddings_dataset = ManiSkillTrajectoryDataset(EMBEDDINGS_H5_PATH)
 print(
     f"""Dataset lenght: {
@@ -659,7 +665,7 @@ def check_temporal_consistency(start_frame_idx, episode_length):
     print(f"Dissimilarity (First vs Last): {sim_extreme.item():.4f}")
 
 
-# Check temporal consistency for the first 5 episodes
+# Check temporal consistency for the first 5 episodes (cosine similarity over subsequent frames' embeddings)
 start_idx = 0
 for i in range(5):
     print(f"\nEpisode {i}")
@@ -686,9 +692,10 @@ Benchmarking: Compare the success rate of the Graph-State Policy against a basel
 
 # TODO: I should make these more complex, and understand its components
 class GraphStateBCPolicy(nn.Module):
+    """A lightweight MLP to predict actions sequentially"""
+
     def __init__(self, z_dim, proprio_dim, action_dim, hidden_dim):
         super().__init__()
-        # A lightweight 3-layer MLP
         self.mlp = nn.Sequential(
             nn.Linear(z_dim + proprio_dim, hidden_dim),
             nn.ReLU(),
@@ -698,7 +705,7 @@ class GraphStateBCPolicy(nn.Module):
         )
 
     def forward(self, z, proprioception):
-        # Combine "Vision/Spatial" (z) with (proprioception)
+        # Combine the GAT latent embeddings (z) with proprioception
         x = torch.cat([z, proprioception], dim=-1)
         return self.mlp(x)
 
@@ -751,12 +758,13 @@ def validate_bc(model, loader, device):
     return total_loss / len(loader.dataset)
 
 
-# XXX: Beware of data leakage: I should split over episodes, not frames themselves
+# Beware of data leakage: I should split over episodes, not frames themselves
 # In a simulation, Frame 45 and Frame 46 of the same episode are 99.9% identical
 # If random splitting puts Frame 45 in your Train Set and Frame 46 in your Validation Set, your Validation MSE will drop to near zero
 # Train Set: Episodes 0 to 800 (contains all their frames)
 # Validation Set: Episodes 800 to 1000 (contains all their frames)
 
+# Find the splitting index, as done before
 episode_lengths = get_all_episode_lengths(EMBEDDINGS_JS_PATH)
 num_train_episodes = int(SPLIT_RATIO * len(episode_lengths))
 split_idx = sum(episode_lengths[:num_train_episodes])
@@ -770,20 +778,22 @@ val_indices = range(split_idx, len(embeddings_dataset))
 bc_train_dataset = torch.utils.data.Subset(embeddings_dataset, train_indices)
 bc_val_dataset = torch.utils.data.Subset(embeddings_dataset, val_indices)
 
+# Move the data to the dataloaders
 bc_train_loader = TorchDataLoader(
     bc_train_dataset, batch_size=BC_BATCH_SIZE, shuffle=True
 )
 bc_val_loader = TorchDataLoader(bc_val_dataset, batch_size=BC_BATCH_SIZE)
 
+# Prepare the model, optmizer etc.
 policy = GraphStateBCPolicy(
     z_dim=GAT_LATENT_CHANNELS,
     proprio_dim=BC_PROPRIO_DIM,
     action_dim=BC_ACTION_DIM,
     hidden_dim=BC_HIDDEN_DIM,
 ).to(device)
-
 bc_optimizer = torch.optim.AdamW(policy.parameters(), lr=BC_LR)
 
+# Check for existence of a checkpoint and eventually load it
 if BC_CHECKPOINT_PATH.exists():
     bc_checkpoint = torch.load(BC_CHECKPOINT_PATH)
     policy.load_state_dict(checkpoint["model_state_dict"])
@@ -795,6 +805,7 @@ else:
     start_epoch = 0
     print("No BC checkpoint found. Starting training from scratch.")
 
+# Train the model for the missing epochs
 trained = False
 for epoch in range(start_epoch, BC_EPOCHS):
     train_loss = train_bc_epoch(policy, bc_train_loader, bc_optimizer, device)
@@ -805,6 +816,7 @@ for epoch in range(start_epoch, BC_EPOCHS):
         )
     trained = True
 
+# If the model got trained, save the new checkpoint
 if trained:
     checkpoint = {
         "model_state_dict": policy.state_dict(),

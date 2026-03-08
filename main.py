@@ -10,6 +10,7 @@
 import os
 from datetime import datetime
 import json
+from pathlib import Path
 
 from typing import Union
 import h5py
@@ -32,17 +33,28 @@ from torch_geometric.loader import DataLoader as GeoDataLoader
 
 torch.manual_seed(42)
 
-DS_PATH = "/home/massimiliano/.maniskill/demos/PickCube-v1/motionplanning/"
+# For proper path creation
+home = Path.home()
+cwd = Path.cwd()
+script_location = Path(__file__).resolve().parent
 
-H5_PATH = DS_PATH + "trajectory.h5"
-REPLAYED_H5_PATH = DS_PATH + "trajectory.state.pd_ee_delta_pos.physx_cpu.h5"
-EMBEDDINGS_H5_PATH = REPLAYED_H5_PATH.replace(".h5", ".embeddings.h5")
+print(home)
+print(cwd)
+print(script_location)
 
-JS_PATH = DS_PATH + "trajectory.json"
-REPLAYED_JS_PATH = DS_PATH + "trajectory.state.pd_ee_delta_pos.physx_cpu.json"
-EMBEDDINGS_JS_PATH = REPLAYED_JS_PATH.replace(".json", ".embeddings.json")
+DS_PATH = home / ".maniskill/demos/PickCube-v1/motionplanning/"
 
-CHECKPOINT_PATH = "gatautoencoder_checkpoint_E50_2026-03-06T16:28:41.304114.pth"
+H5_PATH = DS_PATH / "trajectory.h5"
+REPLAYED_H5_PATH = DS_PATH / "trajectory.state.pd_ee_delta_pos.physx_cpu.h5"
+EMBEDDINGS_H5_PATH = REPLAYED_H5_PATH.with_suffix(".embeddings.h5")
+
+JS_PATH = DS_PATH / "trajectory.json"
+REPLAYED_JS_PATH = DS_PATH / "trajectory.state.pd_ee_delta_pos.physx_cpu.json"
+EMBEDDINGS_JS_PATH = REPLAYED_JS_PATH.with_suffix(".embeddings.json")
+
+CHECKPOINT_PATH = (
+    script_location / "gatautoencoder_checkpoint_E50_2026-03-06T16:28:41.304114.pth"
+)
 
 EPOCHS = 50
 LR = 1e-3
@@ -89,7 +101,7 @@ class ManiSkillTrajectoryDataset(Dataset):
         self.dataset_file = dataset_file
         self.device = device
         self.data = h5py.File(dataset_file, "r")
-        json_path = dataset_file.replace(".h5", ".json")
+        json_path = dataset_file.with_suffix(".json")
         self.json_data = load_json(json_path)
         self.episodes = self.json_data["episodes"]
         self.env_info = self.json_data["env_info"]
@@ -441,7 +453,7 @@ model = GATAutoencoder(
 optimizer = torch.optim.AdamW(model.parameters(), lr=LR)
 
 # Check for existence of checkpoint to resume/skip training
-if os.path.exists(CHECKPOINT_PATH):
+if CHECKPOINT_PATH.exists():
     checkpoint = torch.load(CHECKPOINT_PATH)
     model.load_state_dict(checkpoint["model_state_dict"])
     optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
@@ -499,15 +511,15 @@ def compute_and_store_embeddings(model, base_h5_path, output_h5_path):
     """
     Copies the original HDF5 file and appends embeddings for each frame under each trajectory group.
     """
-    if os.path.exists(base_h5_path):
+    if base_h5_path.exists():
         shutil.copy(base_h5_path, output_h5_path)
-        base_json_path = base_h5_path.replace(".h5", ".json")
-        output_json_path = base_json_path.replace(".json", ".embeddings.json")
+        base_json_path = base_h5_path.with_suffix(".json")
+        output_json_path = base_json_path.with_suffix(".embeddings.json")
         print("Copied HDF5 data to new file for embedding storage.")
     else:
         raise FileNotFoundError(f"Base HDF5 file not found at {base_h5_path}")
 
-    if os.path.exists(base_json_path):
+    if base_json_path.exists():
         shutil.copy(base_json_path, output_json_path)
         print(f"Copied JSON metadata to {output_json_path}.")
     else:
@@ -542,7 +554,7 @@ def compute_and_store_embeddings(model, base_h5_path, output_h5_path):
 
 
 # Check for existence of the dataset, if not, compute and store them
-if not os.path.exists(EMBEDDINGS_H5_PATH):
+if not EMBEDDINGS_H5_PATH.exists():
     print(
         f"Embeddings H5 dataset {EMBEDDINGS_H5_PATH} not found. Computing and storing embeddings..."
     )
@@ -605,6 +617,7 @@ for i in range(5):
     episode_len = episode_lengths[i]
     check_temporal_consistency(start_idx, episode_len)
     start_idx += episode_len
+print()
 
 # Phase 4: Policy Training & Evaluation
 """

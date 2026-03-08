@@ -457,7 +457,13 @@ class GATAutoencoder(nn.Module):
         return reconstructed_xyz, global_z
 
 
-# NOTE: Consider that proprioception will be already present in the input data to the IL model later, maybe it is redundant here?
+# Consider that proprioception will be already present in the input data to the IL model later,
+# maybe it is redundant to pass it here?
+#
+# My answer: I dont think so, as features in the latent representation are not the same of the raw ones,
+# they bring some extra information by interacting with other nodes in the graph!
+
+
 def train_epoch(model, loader, optimizer, device):
     model.train()
     total_loss = 0
@@ -732,8 +738,7 @@ Benchmarking: Compare the success rate of the Graph-State Policy against a basel
 
 
 # TODO: I could make this architecture more complex
-# TODO: Compare with [ManiSkill documentation](https://maniskill.readthedocs.io/en/latest/user_guide/learning_from_demos/baselines.html)
-# TODO: Comparison with baseline is still missing
+# TODO: Comparison with baseline is still missing, see [ManiSkill documentation](https://maniskill.readthedocs.io/en/latest/user_guide/learning_from_demos/baselines.html)
 class GraphStateBCPolicy(nn.Module):
     """A lightweight MLP to predict actions sequentially"""
 

@@ -46,6 +46,7 @@ def seed_everything(seed: int) -> None:
 
 # Seeding
 seed_everything(42)
+now = datetime.now()
 
 # For proper path generation
 home = Path.home()
@@ -67,10 +68,10 @@ EMBEDDINGS_JS_PATH = REPLAYED_JS_PATH.with_suffix(".embeddings.json")
 
 # These are to load/save checkpoints
 GAT_CHECKPOINT_PATH = (
-    script_location / "gatautoencoder_checkpoint_E50_2026-03-06T16:28:41.304114.pth"
+    script_location / "gatautoencoder_checkpoint_E4_2026-03-08T16:22:31.728025.pth"
 )
 BC_CHECKPOINT_PATH = (
-    script_location / "bc_policy_checkpoint_E50_2026-03-07T17:34:46.051669.pth"
+    script_location / "bc_policy_checkpoint_E49_2026-03-08T16:25:45.109680.pth"
 )
 
 # Generic Hyperparameters
@@ -85,7 +86,7 @@ GAT_ATTENTION_HEADS = 4
 GAT_LATENT_CHANNELS = 6
 
 # BC Hyperparameters
-BC_EPOCHS = 50
+BC_EPOCHS = 20
 BC_LR = 1e-3
 BC_BATCH_SIZE = 64
 BC_ACTION_DIM = 4
@@ -124,6 +125,8 @@ class ManiSkillTrajectoryDataset(Dataset):
         load_count (int): the number of trajectories from the dataset to load into memory. If -1, will load all into memory
         success_only (bool): whether to skip trajectories that are not successful in the end. Default is false
         device: The location to save data to. If None will store as numpy (the default), otherwise will move data to that device
+
+    Reference: https://maniskill.readthedocs.io/en/latest/user_guide/datasets/demos.html#pytorch
     """
 
     def __init__(
@@ -296,7 +299,8 @@ def print_dict_tree(data, indent=""):
 
 
 # Actors: 13 dimensions for position + quaternon + velocity + angular_velocity
-# Articulations: 13 dimensions for position + quaternon + velocity + angular_velocity
+# Articulations: 31 dimensions for position + quaternon + velocity + angular_velocity of root state + joints
+#
 #   Note:   articulations is not intended as 7 actors (arms) + 2 (gripper hands), which would lead to (7+2)*13 dimensions
 #
 #           When two objects are joined by a hinge (a revolute joint), they lose almost all their relative freedom.
@@ -304,8 +308,32 @@ def print_dict_tree(data, indent=""):
 #           it only has 1 DOF relative to its parent—it can only rotate around one axis.
 #
 #           So we rather reduce coordinates of such hinged actors by taking a root (usually the 000 coordinate or the base)
-#           bringing 13 dimensions (just as before) and joint position (1) + joint velocity (1) for each hinged actor (7+2)
+#           bringing 13 dimensions (just as before) and joint position (1) + joint velocity (1) for each hinged actor (7 for arm + 2 for gripper hand)
 #           so we get 13 + 9*(2) = 13 + 18 = 31
+#
+#   Indexing of actors arrays
+#
+#           pose.p            -> 3  (x,y,z)
+#           pose.q            -> 4  (quaternion w,x,y,z)
+#           linear_velocity   -> 3
+#           angular_velocity  -> 3
+#
+#   Indexing of articulations arrays
+#
+#           (ALL COSTANTS)
+#           0:3   root position
+#           3:7   root quaternion
+#           7:10  root linear velocity
+#           10:13 root angular velocity
+#
+#           (THESE CHANGE)
+#           13:22 joint positions (9)
+#           22:31 joint velocities (9)
+#
+#   References:
+#       https://maniskill.readthedocs.io/en/latest/_modules/mani_skill/utils/structs/actor.html
+#       https://maniskill.readthedocs.io/en/latest/_modules/mani_skill/utils/structs/articulation.html
+
 print_dict_tree(dataset[0])
 
 # Graph Construction:
@@ -336,6 +364,9 @@ Implementation: Build a preprocessing script to convert flat state vectors into 
 # Note sill that informing our robot about goal and the arm/hand positions is NOT data leaking, as we are not
 # informing it about which actions to take! We are only tellig it that the goal is specifically there in space, and its own body is somewhere else
 #
+# Preprocessing, dropout or batch norm will not be contemplated in the following, nor lr scheduler and other sophisticated tools
+# as this is supposed to be some simple showcase; furthermore remind that all the controllers have a normalized
+# action space ([-1, 1]) in Franka Emilia Panda robot, except arm_pd_joint_pos and arm_pd_joint_pos_vel
 
 
 # TODO: I can also add other nodes and make a more complex graph, as well adding euclidean distance as edge weights
@@ -378,8 +409,10 @@ Ensure the embedding z is expressive enough to reconstruct the scene geometry ac
 """
 
 
-# TODO: I should also implment a second head for reconstructing edge_index or A
-# TODO: I should also understand submodules, as well why we pass that batch stuff (see also why we can pass zeros later when generating the features)
+# TODO: I could also implment a second head for reconstructing edge_index or A
+#
+# TODO: I should understand GNNs in general, as well why we pass that batch stuff
+#   --> see also why we pass zeros later when generating the features
 class GATAutoencoder(nn.Module):
     def __init__(self, in_channels, hidden_channels, latent_channels, heads):
         super().__init__()
@@ -424,43 +457,50 @@ class GATAutoencoder(nn.Module):
         return reconstructed_xyz, global_z
 
 
-# TODO: should use more than 3 columns for training
 # NOTE: Consider that proprioception will be already present in the input data to the IL model later, maybe it is redundant here?
 def train_epoch(model, loader, optimizer, device):
     model.train()
     total_loss = 0
     for data in loader:
-        # Load datta on device
+        # Load data on device and reset the gradients
         data = data.to(device)
         optimizer.zero_grad()
 
         # Forward pass
         out, _ = model(data)
 
-        # Target is only the first 3 columns (XYZ) for simplicity
+        # Loss (Target is only the first 3 columns (XYZ) since the remaning are the identities)
         target_xyz = data.x[:, :3]
         loss = F.mse_loss(out, target_xyz)
 
         # Backward pass
         loss.backward()
         optimizer.step()
+
+        # To have a proper loss printing, we weight this for the size of the batch
         total_loss += loss.item() * data.num_graphs
+
     return total_loss / len(loader.dataset)
 
 
-# TODO: here too
 @torch.no_grad()
 def validate(model, loader, device):
     model.eval()
     total_loss = 0
     for data in loader:
+        # Load data on device
         data = data.to(device)
+
         # Forward pass
         out, _ = model(data)
-        # Target is only the first 3 columns (XYZ)
+
+        # Loss (Target is only the first 3 columns (XYZ) since the remaning are the identities)
         target_xyz = data.x[:, :3]
         loss = F.mse_loss(out, target_xyz)
+
+        # To have a proper loss printing, we weight this for the size of the batch
         total_loss += loss.item() * data.num_graphs
+
     return total_loss / len(loader.dataset)
 
 
@@ -489,6 +529,7 @@ episode_lengths = get_all_episode_lengths(REPLAYED_JS_PATH)
 data_list = [build_graph(i) for i in range(len(dataset))]
 
 # Extract splitting index over dataset (remind dataset is a flatten sequence of episode's frame, so we need to reconstruct the frame that divides the 80/20 of episodes)
+# WARNING: We do the same exact split for the BC policy later, this is safe right?
 episode_lengths = get_all_episode_lengths(JS_PATH)
 num_train_episodes = int(SPLIT_RATIO * len(episode_lengths))
 split_idx = sum(episode_lengths[:num_train_episodes])
@@ -527,7 +568,6 @@ else:
     print("No checkpoint found. Starting training from scratch.")
 
 # Loop
-trained = False
 for epoch in range(start_epoch, GAT_EPOCHS):
     train_loss = train_epoch(model, train_loader, optimizer, device)
     val_loss = validate(model, val_loader, device)
@@ -535,10 +575,9 @@ for epoch in range(start_epoch, GAT_EPOCHS):
         print(
             f"Epoch {epoch:03d}, Train MSE: {train_loss:.4f}, Val MSE: {val_loss:.4f}"
         )
-    trained = True
 
 # Save if we modified the model weights
-if trained:
+if start_epoch < GAT_EPOCHS:
     checkpoint = {
         "model_state_dict": model.state_dict(),
         "optimizer_state_dict": optimizer.state_dict(),
@@ -556,7 +595,6 @@ if trained:
     }
 
     # Get current timestamp (seconds since epoch)
-    now = datetime.now()
     torch.save(checkpoint, f"gatautoencoder_checkpoint_E{epoch}_{now.isoformat()}.pth")
     print(f"Saved checkpoint at epoch {epoch} with timestamp {now.isoformat()}")
 
@@ -693,7 +731,9 @@ Benchmarking: Compare the success rate of the Graph-State Policy against a basel
 """
 
 
-# TODO: I should make these more complex, and understand its components
+# TODO: I could make this architecture more complex
+# TODO: Compare with [ManiSkill documentation](https://maniskill.readthedocs.io/en/latest/user_guide/learning_from_demos/baselines.html)
+# TODO: Comparison with baseline is still missing
 class GraphStateBCPolicy(nn.Module):
     """A lightweight MLP to predict actions sequentially"""
 
@@ -713,16 +753,14 @@ class GraphStateBCPolicy(nn.Module):
         return self.mlp(x)
 
 
-# TODO: Should understand better the use of z.size(0) on the total_loss
 def train_bc_epoch(model, loader, optimizer, device):
     model.train()
     total_loss = 0
     for batch in loader:
+        # Load data on device and reset the gradients
         z = batch["priv_states"]["embeddings"].to(device)
-        proprio = batch["priv_states"]["articulations"]["panda"][:, 7:25].to(device)
-
+        proprio = batch["priv_states"]["articulations"]["panda"][:, 13:31].to(device)
         target_action = batch["action"].to(device)
-
         optimizer.zero_grad()
 
         # Forward pass
@@ -731,23 +769,24 @@ def train_bc_epoch(model, loader, optimizer, device):
         # Loss
         loss = F.mse_loss(out, target_action)
 
+        # Backward pass
         loss.backward()
         optimizer.step()
 
-        # XXX: why?
+        # To have a proper loss printing, we weight this for the size of the batch
         total_loss += loss.item() * z.size(0)
 
     return total_loss / len(loader.dataset)
 
 
-# TODO: here too
 @torch.no_grad()
 def validate_bc(model, loader, device):
     model.eval()
     total_loss = 0
     for batch in loader:
+        # Load data on device
         z = batch["priv_states"]["embeddings"].to(device)
-        proprio = batch["priv_states"]["articulations"]["panda"][:, 7:25].to(device)
+        proprio = batch["priv_states"]["articulations"]["panda"][:, 13:31].to(device)
         target_action = batch["action"].to(device)
 
         # Forward pass
@@ -755,7 +794,8 @@ def validate_bc(model, loader, device):
 
         # Loss
         loss = F.mse_loss(out, target_action)
-        # XXX: why?
+
+        # To have a proper loss printing, we weight this for the size of the batch
         total_loss += loss.item() * z.size(0)
 
     return total_loss / len(loader.dataset)
@@ -799,9 +839,9 @@ bc_optimizer = torch.optim.AdamW(policy.parameters(), lr=BC_LR)
 # Check for existence of a checkpoint and eventually load it
 if BC_CHECKPOINT_PATH.exists():
     bc_checkpoint = torch.load(BC_CHECKPOINT_PATH)
-    policy.load_state_dict(checkpoint["model_state_dict"])
-    bc_optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-    start_epoch = checkpoint.get("epoch", 0)
+    policy.load_state_dict(bc_checkpoint["model_state_dict"])
+    bc_optimizer.load_state_dict(bc_checkpoint["optimizer_state_dict"])
+    start_epoch = bc_checkpoint.get("epoch", 0)
     print(f"Loaded BC checkpoint from epoch {start_epoch}.")
 else:
     # Proceed with training from scratch
@@ -809,7 +849,6 @@ else:
     print("No BC checkpoint found. Starting training from scratch.")
 
 # Train the model for the missing epochs
-trained = False
 for epoch in range(start_epoch, BC_EPOCHS):
     train_loss = train_bc_epoch(policy, bc_train_loader, bc_optimizer, device)
     val_loss = validate_bc(policy, bc_val_loader, device)
@@ -817,11 +856,10 @@ for epoch in range(start_epoch, BC_EPOCHS):
         print(
             f"BC Epoch {epoch:03d}, Train Action MSE: {train_loss:.5f}, Val Action MSE: {val_loss:.5f}"
         )
-    trained = True
 
 # If the model got trained, save the new checkpoint
-if trained:
-    checkpoint = {
+if start_epoch < BC_EPOCHS:
+    bc_checkpoint = {
         "model_state_dict": policy.state_dict(),
         "optimizer_state_dict": bc_optimizer.state_dict(),
         "epoch": epoch,
@@ -839,6 +877,5 @@ if trained:
     }
 
     # Get current timestamp (seconds since epoch)
-    now = datetime.now()
-    torch.save(checkpoint, f"bc_policy_checkpoint_E{epoch}_{now.isoformat()}.pth")
+    torch.save(bc_checkpoint, f"bc_policy_checkpoint_E{epoch}_{now.isoformat()}.pth")
     print(f"Saved checkpoint at epoch {epoch} with timestamp {now.isoformat()}")

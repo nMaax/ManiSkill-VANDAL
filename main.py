@@ -72,8 +72,7 @@ GAT_CHECKPOINT_PATH = (
     script_location / "gatautoencoder_checkpoint_E4_2026-03-09T16:23:18.597701.pth"
 )
 BC_CHECKPOINT_PATH = (
-    script_location
-    / "none"  # "bc_policy_checkpoint_E19_2026-03-09T17:24:04.437559.pth"
+    script_location / "bc_policy_checkpoint_E19_2026-03-09T17:24:04.437559.pth"
 )
 
 # Generic Hyperparameters
@@ -970,7 +969,6 @@ print("\n\n--- Phase 4.5: Baseline Benchmarking ---")
 
 
 class BaselineBCPolicy(nn.Module):
-    # Updated to 37 dimensions for a perfectly fair fight
     def __init__(self, raw_dim=37, action_dim=4, hidden_dim=64):
         super().__init__()
         self.mlp = nn.Sequential(
@@ -989,17 +987,14 @@ def train_baseline_epoch(model, loader, optimizer, device):
     model.train()
     total_loss = 0
     for batch in loader:
-        # 1. Grab the exact same objects the Graph sees
         cube = batch["priv_states"]["actors"]["cube"][:, :3].to(device)
         goal = batch["priv_states"]["actors"]["goal_site"][:, :3].to(device)
         table = batch["priv_states"]["actors"]["table-workspace"][:, :3].to(device)
         base = batch["priv_states"]["articulations"]["panda"][:, :3].to(device)
 
-        # 2. Grab the Gripper and Proprioception
         gripper = batch["obs"][:, 18:25].to(device)
         proprio = batch["priv_states"]["articulations"]["panda"][:, 13:31].to(device)
 
-        # 3. Concatenate them all into a flat 37D vector (No edges, no structure!)
         raw_state = torch.cat([cube, goal, table, base, gripper, proprio], dim=-1)
         target_action = batch["action"].to(device)
 

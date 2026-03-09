@@ -427,6 +427,9 @@ def build_graph(idx):
     identities = np.eye(5)
 
     # Concatenate XYZ with Identities -> Shape: [5 nodes, 8 features]
+    # NOTE: Most of these nodes are actually static, this may lead to a really good model later since it understands
+    # that it can achive low MSE by simply memorizing the tabl, base and goal positions.
+    # A solution could be to enforce some arbitrary topology (see NOTE below), or tweak the latent dimension above?
     nodes_list = [
         np.concatenate([cube_xyz, identities[0]]),
         np.concatenate([goal_xyz, identities[1]]),
@@ -472,28 +475,24 @@ Ensure the embedding z is expressive enough to reconstruct the scene geometry ac
 """
 
 
-# TODO: I should understand GNNs in general, as well why we pass that batch stuff
-#   --> see also why we pass zeros later when generating the features
 # NOTE: I could also implment a second head for reconstructing edge_index or adjacency matrix? For now not really since it is fully connected, but maybe?
 class GATAutoencoder(nn.Module):
     def __init__(self, in_channels, hidden_channels, latent_channels, heads):
         super().__init__()
 
-        # XXX: ENCODER: Maps 6 dims -> hidden
+        # ENCODER: graph -> hidden -> latent
         self.encoder_conv1 = GATConv(
             in_channels, hidden_channels, heads=heads, edge_dim=1
         )
         self.encoder_conv2 = GATConv(
             hidden_channels * heads, latent_channels, heads=1, concat=False, edge_dim=1
-        )
+        )  # Since heads=1, concat=False is not really needed, but I put it for clarity
 
-        # DECODER: Takes the GLOBAL latent vector + Node Identity -> Reconstructs XYZ
-        # Input to decoder: latent_channels (e.g., 16) + 3 (identity) = 19
+        # DECODER: latent vector + node identity -> reconstructs XYZ
         self.decoder = nn.Sequential(
-            nn.Linear(latent_channels + 5, hidden_channels),
+            nn.Linear(latent_channels + 5, hidden_channels),  # 5 is the number of nodes
             nn.ReLU(),
-            # We only want to predict the 3 XYZ coords
-            nn.Linear(hidden_channels, 3),
+            nn.Linear(hidden_channels, 3),  # We only want to predict the 3 XYZ coords
         )
 
     def encode(self, x, edge_index, edge_attr, batch):
@@ -501,7 +500,7 @@ class GATAutoencoder(nn.Module):
         x = F.elu(x)
         node_z = self.encoder_conv2(x, edge_index, edge_attr)
 
-        # XXX: Pool all nodes in the graph into ONE vector z (bottleneck)
+        # Pool all nodes in the graph into z
         global_z = global_mean_pool(node_z, batch)
         return global_z
 
@@ -512,7 +511,7 @@ class GATAutoencoder(nn.Module):
         # To decode, we expand the global vector back to all nodes
         z_expanded = global_z[data.batch]
 
-        # XXX: Give the decoder the encoded latent vector (z) and the node identities (values of x after the first 3 columns)
+        # Give the decoder the encoded latent vector (z) and the node identities (values of x after the first 3 columns XYZ)
         identities = data.x[:, 3:]
         dec_input = torch.cat([z_expanded, identities], dim=-1)
 
@@ -638,6 +637,17 @@ else:
     start_epoch = 0
     print("No checkpoint found. Starting training from scratch.")
 
+# Quick check to find the dummy MSE to compare our model
+# train_xyz = torch.stack([data.x[:, :3] for data in train_dataset])
+# mean_node_positions = train_xyz.mean(dim=0)
+# val_xyz = torch.stack([data.x[:, :3] for data in val_dataset])
+# dummy_predictions = mean_node_positions.unsqueeze(0).expand_as(val_xyz)
+# dummy_loss = F.mse_loss(dummy_predictions, val_xyz)
+#
+# print("Dumb Baseline")
+# print(f"Average Node Positions (Cube, Goal, Table, Base, Hand):\n{mean_node_positions}")
+# print(f"Dumb Baseline Validation MSE: {dummy_loss.item():.6f}")
+
 # Loop
 for epoch in range(start_epoch, GAT_EPOCHS):
     train_loss = train_epoch(model, train_loader, optimizer, device)
@@ -717,7 +727,7 @@ def compute_and_store_embeddings(model, base_h5_path, output_h5_path):
                         graph.x,
                         graph.edge_index,
                         graph.edge_attr,
-                        torch.zeros(
+                        torch.zeros(  # We do not have a PyG dataloader, so we need to make a dummy batch tensor: equivalently, a batch size of 1
                             graph.x.shape[0], dtype=torch.long, device=graph.x.device
                         ),
                     )

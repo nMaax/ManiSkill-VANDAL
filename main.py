@@ -73,8 +73,7 @@ GAT_CHECKPOINT_PATH = (
     script_location / "gatautoencoder_checkpoint_E4_2026-03-09T20:02:45.234847.pth"
 )
 BC_CHECKPOINT_PATH = (
-    script_location
-    / "none"  # "bc_policy_checkpoint_E19_2026-03-09T20:02:45.234847.pth"
+    script_location / "bc_policy_checkpoint_E19_2026-03-09T21:17:30.739075.pth"
 )
 
 # Generic Hyperparameters

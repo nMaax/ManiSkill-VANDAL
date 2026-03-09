@@ -73,7 +73,8 @@ GAT_CHECKPOINT_PATH = (
     script_location / "gatautoencoder_checkpoint_E4_2026-03-09T20:02:45.234847.pth"
 )
 BC_CHECKPOINT_PATH = (
-    script_location / "bc_policy_checkpoint_E19_2026-03-09T20:02:45.234847.pth"
+    script_location
+    / "none"  # "bc_policy_checkpoint_E19_2026-03-09T20:02:45.234847.pth"
 )
 
 # Generic Hyperparameters
@@ -823,8 +824,6 @@ Benchmarking: Compare the success rate of the Graph-State Policy against a basel
 """
 
 
-# NOTE: I could make this architecture more complex
-# TODO: Comparison with baseline is still missing, see [ManiSkill documentation](https://maniskill.readthedocs.io/en/latest/user_guide/learning_from_demos/baselines.html)
 class GraphStateBCPolicy(nn.Module):
     """A lightweight MLP to predict actions sequentially"""
 
@@ -842,6 +841,45 @@ class GraphStateBCPolicy(nn.Module):
         # Combine the GAT latent embeddings (z) with proprioception
         x = torch.cat([z, gripper, proprio], dim=-1)
         return self.mlp(x)
+
+
+class ResBlock(nn.Module):
+    def __init__(self, dim, p=0.1):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(dim, dim),
+            nn.LayerNorm(dim),
+            nn.ReLU(),
+            nn.Dropout(p),
+            nn.Linear(dim, dim),
+        )
+
+    def forward(self, x):
+        return x + self.net(x)  # The Skip Connection
+
+
+class ResNetGraphStateBCPolicy(nn.Module):
+    def __init__(self, z_dim, proprio_dim, gripper_dim, action_dim, hidden_dim=256):
+        super().__init__()
+        input_dim = z_dim + proprio_dim + gripper_dim
+
+        self.input_layer = nn.Linear(input_dim, hidden_dim)
+
+        # Stack 3 Residual Blocks for deep reasoning
+        self.res_stack = nn.Sequential(
+            ResBlock(hidden_dim),
+            ResBlock(hidden_dim),
+            ResBlock(hidden_dim),
+            ResBlock(hidden_dim),
+        )
+
+        self.output_layer = nn.Linear(hidden_dim, action_dim)
+
+    def forward(self, z, gripper, proprioception):
+        x = torch.cat([z, gripper, proprioception], dim=-1)
+        x = F.relu(self.input_layer(x))
+        x = self.res_stack(x)
+        return self.output_layer(x)
 
 
 def train_bc_epoch(model, loader, optimizer, device):
@@ -921,13 +959,23 @@ bc_train_loader = TorchDataLoader(
 bc_val_loader = TorchDataLoader(bc_val_dataset, batch_size=BC_BATCH_SIZE)
 
 # Prepare the model, optmizer etc.
-policy = GraphStateBCPolicy(
+
+# policy = GraphStateBCPolicy(
+#    z_dim=GAT_LATENT_CHANNELS,
+#    proprio_dim=BC_PROPRIO_DIM,
+#    gripper_dim=BC_GRIPPER_DIM,
+#    action_dim=BC_ACTION_DIM,
+#    hidden_dim=BC_HIDDEN_DIM,
+# ).to(device)
+
+policy = ResNetGraphStateBCPolicy(
     z_dim=GAT_LATENT_CHANNELS,
     proprio_dim=BC_PROPRIO_DIM,
     gripper_dim=BC_GRIPPER_DIM,
     action_dim=BC_ACTION_DIM,
-    hidden_dim=BC_HIDDEN_DIM,
+    hidden_dim=256,
 ).to(device)
+
 bc_optimizer = torch.optim.AdamW(policy.parameters(), lr=BC_LR)
 
 # Check for existence of a checkpoint and eventually load it

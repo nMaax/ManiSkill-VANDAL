@@ -69,10 +69,11 @@ EMBEDDINGS_JS_PATH = REPLAYED_JS_PATH.with_suffix(".embeddings.json")
 
 # These are to load/save checkpoints
 GAT_CHECKPOINT_PATH = (
-    script_location / "gatautoencoder_checkpoint_E4_2026-03-08T21:18:08.946347.pth"
+    script_location / "gatautoencoder_checkpoint_E4_2026-03-09T16:23:18.597701.pth"
 )
 BC_CHECKPOINT_PATH = (
-    script_location / "bc_policy_checkpoint_E19_2026-03-08T19:18:49.445646.pth"
+    script_location
+    / "none"  # "bc_policy_checkpoint_E19_2026-03-09T17:24:04.437559.pth"
 )
 
 # Generic Hyperparameters
@@ -92,6 +93,7 @@ BC_LR = 1e-3
 BC_BATCH_SIZE = 64
 BC_ACTION_DIM = 4
 BC_PROPRIO_DIM = 18
+BC_GRIPPER_DIM = 7
 BC_HIDDEN_DIM = 64
 
 # Phase 1: Scene Graph Engineering
@@ -630,7 +632,7 @@ if GAT_CHECKPOINT_PATH.exists():
     checkpoint = torch.load(GAT_CHECKPOINT_PATH)
     model.load_state_dict(checkpoint["model_state_dict"])
     optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-    start_epoch = checkpoint.get("epoch", 0)
+    start_epoch = checkpoint.get("epoch", -1) + 1
     print(f"Loaded checkpoint from epoch {start_epoch}.")
 else:
     # Proceed with training from scratch
@@ -816,19 +818,19 @@ Benchmarking: Compare the success rate of the Graph-State Policy against a basel
 class GraphStateBCPolicy(nn.Module):
     """A lightweight MLP to predict actions sequentially"""
 
-    def __init__(self, z_dim, proprio_dim, action_dim, hidden_dim):
+    def __init__(self, z_dim, proprio_dim, gripper_dim, action_dim, hidden_dim):
         super().__init__()
         self.mlp = nn.Sequential(
-            nn.Linear(z_dim + proprio_dim, hidden_dim),
+            nn.Linear(z_dim + proprio_dim + gripper_dim, hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, action_dim),
         )
 
-    def forward(self, z, proprioception):
+    def forward(self, z, gripper, proprioception):
         # Combine the GAT latent embeddings (z) with proprioception
-        x = torch.cat([z, proprioception], dim=-1)
+        x = torch.cat([z, gripper, proprioception], dim=-1)
         return self.mlp(x)
 
 
@@ -838,12 +840,13 @@ def train_bc_epoch(model, loader, optimizer, device):
     for batch in loader:
         # Load data on device and reset the gradients
         z = batch["priv_states"]["embeddings"].to(device)
+        gripper = batch["obs"][:, 18:25].to(device)  # Gripper state
         proprio = batch["priv_states"]["articulations"]["panda"][:, 13:31].to(device)
         target_action = batch["action"].to(device)
         optimizer.zero_grad()
 
         # Forward pass
-        out = model(z, proprio)
+        out = model(z, gripper, proprio)
 
         # Loss
         loss = F.mse_loss(out, target_action)
@@ -865,11 +868,12 @@ def validate_bc(model, loader, device):
     for batch in loader:
         # Load data on device
         z = batch["priv_states"]["embeddings"].to(device)
+        gripper = batch["obs"][:, 18:25].to(device)  # Gripper state
         proprio = batch["priv_states"]["articulations"]["panda"][:, 13:31].to(device)
         target_action = batch["action"].to(device)
 
         # Forward pass
-        out = model(z, proprio)
+        out = model(z, gripper, proprio)
 
         # Loss
         loss = F.mse_loss(out, target_action)
@@ -910,6 +914,7 @@ bc_val_loader = TorchDataLoader(bc_val_dataset, batch_size=BC_BATCH_SIZE)
 policy = GraphStateBCPolicy(
     z_dim=GAT_LATENT_CHANNELS,
     proprio_dim=BC_PROPRIO_DIM,
+    gripper_dim=BC_GRIPPER_DIM,
     action_dim=BC_ACTION_DIM,
     hidden_dim=BC_HIDDEN_DIM,
 ).to(device)
@@ -920,8 +925,10 @@ if BC_CHECKPOINT_PATH.exists():
     bc_checkpoint = torch.load(BC_CHECKPOINT_PATH)
     policy.load_state_dict(bc_checkpoint["model_state_dict"])
     bc_optimizer.load_state_dict(bc_checkpoint["optimizer_state_dict"])
-    start_epoch = bc_checkpoint.get("epoch", 0)
-    print(f"Loaded BC checkpoint from epoch {start_epoch}.")
+    start_epoch = bc_checkpoint.get("epoch", -1) + 1
+    print(
+        f"Loaded BC checkpoint from epoch {start_epoch}. With:with losses: Train {bc_checkpoint.get('train_loss', 'N/A'):.5f}, Val {bc_checkpoint.get('val_loss', 'N/A'):.5f}"
+    )
 else:
     # Proceed with training from scratch
     start_epoch = 0

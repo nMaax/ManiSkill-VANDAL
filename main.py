@@ -442,9 +442,19 @@ def build_graph(dataset, idx):
     x = torch.tensor(np.array(nodes_list), dtype=torch.float)
 
     # Generate fully connected graph
-    # NOTE: Could also enforce some arbitrary structue myself, e.g., workbanch is connected only to root and cube (in such case I should also return an Adjacency matrix in the GNN)
-    edges = list(itertools.permutations(range(5), 2))
-    edge_index = torch.tensor(edges, dtype=torch.long).t().contiguous()
+    sparse_edges = [
+        (4, 0),
+        (0, 4),  # Hand <-> Cube
+        (4, 1),
+        (1, 4),  # Hand <-> Goal
+        (4, 3),
+        (3, 4),  # Hand <-> Base (Proprioception anchor)
+        (0, 1),
+        (1, 0),  # Cube <-> Goal (The objective)
+        (0, 2),
+        (2, 0),  # Cube <-> Table (Supporting surface)
+    ]
+    edge_index = torch.tensor(sparse_edges, dtype=torch.long).t().contiguous()
 
     # Calculate Euclidean Distances for Edge Weights
     # Get the XYZ coordinates for the source (row) and target (col) of each edge
@@ -1033,7 +1043,7 @@ def validate_baseline(model, loader, device):
 baseline_policy = BaselineBCPolicy().to(device)
 baseline_optimizer = torch.optim.AdamW(baseline_policy.parameters(), lr=BC_LR)
 
-for epoch in range(1):
+for epoch in range(BC_EPOCHS):
     train_loss = train_baseline_epoch(
         baseline_policy, bc_train_loader, baseline_optimizer, device
     )

@@ -299,7 +299,7 @@ def print_dict_tree(data, indent=""):
             print(f"{indent}{branch}{key}: {type(value).__name__}")
 
 
-# ** Priviledge states **
+# ** Privilege states **
 #
 # Note that `env_states` is simply a direct memory dump from the underlying SAPIENS engine
 #
@@ -351,11 +351,12 @@ def print_dict_tree(data, indent=""):
 #
 #   [0:9],      9,      qpos: Joint Angles (7 arm joints + 2 gripper fingers) -> SAME AS ENV_STATE
 #   [9:18],     9,      qvel: Joint Velocities -> SAME AS ENV_STATE
-#   [18:21],    3,      "tcp_pose (Position): Hand X, Y, Z"
-#   [21:25],    4,      "tcp_pose (Quaternion): Hand W, X, Y, Z"
-#   [25:42],    17,     "Task-specific data (Cube pose, Goal pose, distances, etc.)"
+#   [18:21],    3,      "tcp_pose (Position): X, Y, Z"
+#   [21:25],    4,      "tcp_pose (Quaternion): W, X, Y, Z"
+#   [25:42],    17,     "Other Task-specific data (ignore for now, documentation say it shall be goal_site or something, but this looks strangely too long for that)"
 #
-# Indeed, we can run
+# Indeed, we can run:
+#
 # data = h5py.File(REPLAYED_H5_PATH, "r")
 #
 # Get Frame 0, then slice features 13 to 31
@@ -365,6 +366,13 @@ def print_dict_tree(data, indent=""):
 # print(data["traj_0"]["obs"][0, 0:18])
 #
 # And they will be identical
+#
+# Reference:
+#
+#       https://maniskill.readthedocs.io/en/latest/user_guide/concepts/observation.html#state-dict
+#       https://maniskill.readthedocs.io/en/v3.0.0b10/_modules/mani_skill/envs/sapien_env.html#BaseEnv.get_obs
+#       https://maniskill.readthedocs.io/en/latest/_modules/mani_skill/agents/base_agent.html#BaseAgent.get_proprioception
+#       https://maniskill.readthedocs.io/en/latest/_modules/mani_skill/envs/tasks/tabletop/pick_cube.html#PickCubeEnv._get_obs_extra
 
 print_dict_tree(dataset[0])
 
@@ -412,6 +420,7 @@ def build_graph(idx):
     base_xyz = priv_states["articulations"]["panda"][:3]
 
     # TCP is not available in the SAPIENS data, so we need to retrive it from obs
+    # NOTE: Maybe this one not?
     hand_xyz = obs[18:21]
 
     # Build One-Hot Identities
@@ -428,7 +437,7 @@ def build_graph(idx):
     x = torch.tensor(np.array(nodes_list), dtype=torch.float)
 
     # Generate fully connected graph
-    # NOTE: Could also enforce some arbitrary structue myself, e.g., workbanch is connected only to root and cube
+    # NOTE: Could also enforce some arbitrary structue myself, e.g., workbanch is connected only to root and cube (in such case I should also return an Adjacency matrix in the GNN)
     edges = list(itertools.permutations(range(5), 2))
     edge_index = torch.tensor(edges, dtype=torch.long).t().contiguous()
 
@@ -465,7 +474,7 @@ Ensure the embedding z is expressive enough to reconstruct the scene geometry ac
 
 # TODO: I should understand GNNs in general, as well why we pass that batch stuff
 #   --> see also why we pass zeros later when generating the features
-# NOTE: I could also implment a second head for reconstructing edge_index or A
+# NOTE: I could also implment a second head for reconstructing edge_index or adjacency matrix? For now not really since it is fully connected, but maybe?
 class GATAutoencoder(nn.Module):
     def __init__(self, in_channels, hidden_channels, latent_channels, heads):
         super().__init__()

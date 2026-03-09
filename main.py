@@ -965,3 +965,69 @@ if start_epoch < BC_EPOCHS:
     # Get current timestamp (seconds since epoch)
     torch.save(bc_checkpoint, f"bc_policy_checkpoint_E{epoch}_{now.isoformat()}.pth")
     print(f"Saved checkpoint at epoch {epoch} with timestamp {now.isoformat()}")
+
+print("\n\n--- Phase 4.5: Baseline Benchmarking ---")
+
+
+class BaselineBCPolicy(nn.Module):
+    def __init__(self, raw_dim=18, action_dim=4, hidden_dim=64):
+        super().__init__()
+        self.mlp = nn.Sequential(
+            nn.Linear(raw_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, action_dim),
+        )
+
+    def forward(self, raw_state):
+        return self.mlp(raw_state)
+
+
+def train_baseline_epoch(model, loader, optimizer, device):
+    model.train()
+    total_loss = 0
+    for batch in loader:
+        proprio = batch["priv_states"]["articulations"]["panda"][:, 13:31].to(device)
+
+        raw_state = torch.cat([proprio], dim=-1)
+        target_action = batch["action"].to(device)
+
+        optimizer.zero_grad()
+        out = model(raw_state)
+        loss = F.mse_loss(out, target_action)
+        loss.backward()
+        optimizer.step()
+
+        total_loss += loss.item() * raw_state.size(0)
+    return total_loss / len(loader.dataset)
+
+
+@torch.no_grad()
+def validate_baseline(model, loader, device):
+    model.eval()
+    total_loss = 0
+    for batch in loader:
+        proprio = batch["priv_states"]["articulations"]["panda"][:, 13:31].to(device)
+
+        raw_state = torch.cat([proprio], dim=-1)
+        target_action = batch["action"].to(device)
+
+        out = model(raw_state)
+        loss = F.mse_loss(out, target_action)
+        total_loss += loss.item() * raw_state.size(0)
+    return total_loss / len(loader.dataset)
+
+
+baseline_policy = BaselineBCPolicy().to(device)
+baseline_optimizer = torch.optim.AdamW(baseline_policy.parameters(), lr=BC_LR)
+
+for epoch in range(BC_EPOCHS):
+    train_loss = train_baseline_epoch(
+        baseline_policy, bc_train_loader, baseline_optimizer, device
+    )
+    val_loss = validate_baseline(baseline_policy, bc_val_loader, device)
+    if epoch % 1 == 0:
+        print(
+            f"Baseline Epoch {epoch:03d}, Train MSE: {train_loss:.5f}, Val MSE: {val_loss:.5f}"
+        )

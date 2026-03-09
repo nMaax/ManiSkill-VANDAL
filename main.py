@@ -411,19 +411,19 @@ Implementation: Build a preprocessing script to convert flat state vectors into 
 # action space ([-1, 1]) in Franka Emilia Panda robot, except arm_pd_joint_pos and arm_pd_joint_pos_vel
 
 
-def build_graph(idx):
+def build_graph(dataset, idx):
     priv_states = dataset[idx]["priv_states"]
     obs = dataset[idx]["obs"]
 
     # Extract XYZ for the nodes
-    cube_xyz = priv_states["actors"]["cube"][:3]
-    goal_xyz = priv_states["actors"]["goal_site"][:3]
-    table_xyz = priv_states["actors"]["table-workspace"][:3]
-    base_xyz = priv_states["articulations"]["panda"][:3]
+    cube_xyz = priv_states["actors"]["cube"].squeeze()[:3]
+    goal_xyz = priv_states["actors"]["goal_site"].squeeze()[:3]
+    table_xyz = priv_states["actors"]["table-workspace"].squeeze()[:3]
+    base_xyz = priv_states["articulations"]["panda"].squeeze()[:3]
 
     # TCP is not available in the SAPIENS data, so we need to retrive it from obs
     # NOTE: Maybe this one not?
-    hand_xyz = obs[18:21]
+    hand_xyz = obs.squeeze()[18:21]
 
     # Build One-Hot Identities
     identities = np.eye(5)
@@ -461,7 +461,7 @@ def build_graph(idx):
 
 
 # Try it out
-print(build_graph(0))
+print(build_graph(dataset, 0))
 
 
 # Phase 2: Representation Learning (The GAE)
@@ -598,7 +598,7 @@ episode_lengths = get_all_episode_lengths(REPLAYED_JS_PATH)
 # Validation Set: Episodes 800 to 1000 (contains all their frames)
 
 # Create a list of Data objects using build_graph function
-data_list = [build_graph(i) for i in range(len(dataset))]
+data_list = [build_graph(dataset, i) for i in range(len(dataset))]
 
 # Extract splitting index over dataset (remind dataset is a flatten sequence of episode's frame, so we need to reconstruct the frame that divides the 80/20 of episodes)
 # WARNING: We do the same exact split for the BC policy later, this is safe right?
@@ -721,7 +721,7 @@ def compute_and_store_embeddings(model, base_h5_path, output_h5_path):
             for _ in range(
                 num_frames
             ):  # Loop over frames within the episode/trajectory
-                graph = build_graph(global_frame_idx)
+                graph = build_graph(dataset, global_frame_idx)
                 graph = graph.to(device)
                 model.eval()
                 with torch.no_grad():
@@ -1033,7 +1033,7 @@ def validate_baseline(model, loader, device):
 baseline_policy = BaselineBCPolicy().to(device)
 baseline_optimizer = torch.optim.AdamW(baseline_policy.parameters(), lr=BC_LR)
 
-for epoch in range(BC_EPOCHS):
+for epoch in range(1):
     train_loss = train_baseline_epoch(
         baseline_policy, bc_train_loader, baseline_optimizer, device
     )
@@ -1069,41 +1069,28 @@ def evaluate_graph_policy(gae_model, bc_model, num_episodes=100):
         while not done:
             live_states = env.unwrapped.get_state_dict()
 
-            cube_xyz = live_states["actors"]["cube"][0, :3]
-            goal_xyz = live_states["actors"]["goal_site"][0, :3]
-            table_xyz = live_states["actors"]["table-workspace"][0, :3]
-            base_xyz = live_states["articulations"]["panda"][0, :3]
-            hand_xyz = obs[0, 18:21]
-
-            identities = np.eye(5)
-            nodes_list = [
-                np.concatenate([cube_xyz, identities[0]]),
-                np.concatenate([goal_xyz, identities[1]]),
-                np.concatenate([table_xyz, identities[2]]),
-                np.concatenate([base_xyz, identities[3]]),
-                np.concatenate([hand_xyz, identities[4]]),
+            quick_dataset = [
+                {
+                    "priv_states": live_states,
+                    "obs": obs,
+                }
             ]
-            x = torch.tensor(np.array(nodes_list), dtype=torch.float).to(device)
+            built_graph = build_graph(
+                quick_dataset, 0
+            )  # We only have one frame, so idx=0 is fine
 
-            edges = list(itertools.permutations(range(5), 2))
-            edge_index = (
-                torch.tensor(edges, dtype=torch.long).t().contiguous().to(device)
-            )
+            # Extract node features
+            x = built_graph.x.to(device)
 
-            row, col = edge_index
-            src_xyz = x[row, :3]
-            dst_xyz = x[col, :3]
-            distances = (
-                torch.linalg.vector_norm(src_xyz - dst_xyz, ord=2, dim=1)
-                .view(-1, 1)
-                .to(device)
-            )
+            # Extract topology and weights
+            edge_index = built_graph.edge_index.to(device)
+            edge_attr = built_graph.edge_attr.to(device)
 
             # Batch array of zeros (all nodes belong to the same single graph)
             batch_idx = torch.zeros(5, dtype=torch.long).to(device)
 
             with torch.no_grad():
-                z = gae_model.encode(x, edge_index, distances, batch_idx)
+                z = gae_model.encode(x, edge_index, edge_attr, batch_idx)
 
                 gripper = obs[0, 18:25].detach().clone().unsqueeze(0).to(device)
                 proprio = (

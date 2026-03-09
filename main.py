@@ -85,8 +85,8 @@ GAT_EPOCHS = 5
 GAT_LR = 1e-3
 GAT_BATCH_SIZE = 64
 GAT_HIDDEN_CHANNELS = 32
-GAT_ATTENTION_HEADS = 4
 GAT_LATENT_CHANNELS = 8
+GAT_ATTENTION_HEADS = 4
 
 # BC Hyperparameters
 BC_EPOCHS = 20
@@ -96,6 +96,7 @@ BC_ACTION_DIM = 4
 BC_PROPRIO_DIM = 18
 BC_GRIPPER_DIM = 7
 BC_HIDDEN_DIM = 64
+BC_RES_HIDDEN_DIM = 256
 
 # Phase 1: Scene Graph Engineering
 
@@ -442,18 +443,18 @@ def build_graph(dataset, idx):
     ]
     x = torch.tensor(np.array(nodes_list), dtype=torch.float)
 
-    # Generate fully connected graph
+    # Generate arbitrary edges
     sparse_edges = [
         (4, 0),
         (0, 4),  # Hand <-> Cube
         (4, 1),
         (1, 4),  # Hand <-> Goal
         (4, 3),
-        (3, 4),  # Hand <-> Base (Proprioception anchor)
+        (3, 4),  # Hand <-> Base
         (0, 1),
-        (1, 0),  # Cube <-> Goal (The objective)
+        (1, 0),  # Cube <-> Goal
         (0, 2),
-        (2, 0),  # Cube <-> Table (Supporting surface)
+        (2, 0),  # Cube <-> Table
     ]
     edge_index = torch.tensor(sparse_edges, dtype=torch.long).t().contiguous()
 
@@ -782,19 +783,16 @@ def compute_trajectory_embeddings_similarity(trajectory_embeddings):
 
     # Calculate similarity between adjacent frames
     sim_scores = F.cosine_similarity(z_t, z_next, dim=-1)
-    sim_extreme = F.cosine_similarity(
-        trajectory_embeddings[0], trajectory_embeddings[-1], dim=-1
-    )
 
-    return sim_scores, sim_extreme
+    return sim_scores
 
 
-# NOTE: Could as well check via graphs and other measures, but for now I go for this one here
+# NOTE: Could as well check via plots and other measures, but for now I go for this one here
 def check_temporal_consistency(start_frame_idx, episode_length):
     episode = embeddings_dataset[start_frame_idx : start_frame_idx + episode_length]
     embeddings = torch.tensor(episode["priv_states"]["embeddings"])
 
-    sim_scores, sim_extreme = compute_trajectory_embeddings_similarity(embeddings)
+    sim_scores = compute_trajectory_embeddings_similarity(embeddings)
 
     print(f"Mean Temporal Similarity: {sim_scores.mean().item():.4f}")
 
@@ -859,7 +857,7 @@ class ResBlock(nn.Module):
 
 
 class ResNetGraphStateBCPolicy(nn.Module):
-    def __init__(self, z_dim, proprio_dim, gripper_dim, action_dim, hidden_dim=256):
+    def __init__(self, z_dim, proprio_dim, gripper_dim, action_dim, hidden_dim):
         super().__init__()
         input_dim = z_dim + proprio_dim + gripper_dim
 
@@ -960,21 +958,21 @@ bc_val_loader = TorchDataLoader(bc_val_dataset, batch_size=BC_BATCH_SIZE)
 
 # Prepare the model, optmizer etc.
 
-# policy = GraphStateBCPolicy(
-#    z_dim=GAT_LATENT_CHANNELS,
-#    proprio_dim=BC_PROPRIO_DIM,
-#    gripper_dim=BC_GRIPPER_DIM,
-#    action_dim=BC_ACTION_DIM,
-#    hidden_dim=BC_HIDDEN_DIM,
-# ).to(device)
-
-policy = ResNetGraphStateBCPolicy(
+policy = GraphStateBCPolicy(
     z_dim=GAT_LATENT_CHANNELS,
     proprio_dim=BC_PROPRIO_DIM,
     gripper_dim=BC_GRIPPER_DIM,
     action_dim=BC_ACTION_DIM,
-    hidden_dim=256,
+    hidden_dim=BC_HIDDEN_DIM,
 ).to(device)
+
+# policy = ResNetGraphStateBCPolicy(
+#    z_dim=GAT_LATENT_CHANNELS,
+#    proprio_dim=BC_PROPRIO_DIM,
+#    gripper_dim=BC_GRIPPER_DIM,
+#    action_dim=BC_ACTION_DIM,
+#    hidden_dim=BC_RES_HIDDEN_DIM,
+# ).to(device)
 
 bc_optimizer = torch.optim.AdamW(policy.parameters(), lr=BC_LR)
 

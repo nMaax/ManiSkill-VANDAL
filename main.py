@@ -70,10 +70,10 @@ EMBEDDINGS_JS_PATH = REPLAYED_JS_PATH.with_suffix(".embeddings.json")
 
 # These are to load/save checkpoints
 GAT_CHECKPOINT_PATH = (
-    script_location / "gatautoencoder_checkpoint_E4_2026-03-09T16:23:18.597701.pth"
+    script_location / "gatautoencoder_checkpoint_E4_2026-03-09T20:02:45.234847.pth"
 )
 BC_CHECKPOINT_PATH = (
-    script_location / "bc_policy_checkpoint_E19_2026-03-09T17:24:04.437559.pth"
+    script_location / "bc_policy_checkpoint_E19_2026-03-09T20:02:45.234847.pth"
 )
 
 # Generic Hyperparameters
@@ -1128,6 +1128,7 @@ def evaluate_graph_policy(gae_model, bc_model, num_episodes=100):
 
     env.close()
     sr = (successes / num_episodes) * 100
+    print(f"Success rate: {sr}%")
     return sr
 
 
@@ -1181,14 +1182,9 @@ def evaluate_baseline_policy(baseline_model, num_episodes=100):
 
     env.close()
     sr = (successes / num_episodes) * 100
+    print(f"Success rate: {sr}%")
     return sr
 
 
 graph_sr = evaluate_graph_policy(model, policy)
 baseline_sr = evaluate_baseline_policy(baseline_policy)
-
-print("\n=====================================")
-print("FINAL RESULTS:")
-print(f"Graph-State Policy: {graph_sr}%")
-print(f"Baseline Policy:    {baseline_sr}%")
-print("=====================================")

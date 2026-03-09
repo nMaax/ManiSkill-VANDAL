@@ -30,6 +30,7 @@ from torch_geometric.loader import DataLoader as GeoDataLoader
 
 from mani_skill.utils.io_utils import load_json
 from mani_skill.utils import common
+import gymnasium as gym
 
 
 def seed_everything(seed: int) -> None:
@@ -827,9 +828,9 @@ class GraphStateBCPolicy(nn.Module):
             nn.Linear(hidden_dim, action_dim),
         )
 
-    def forward(self, z, gripper, proprioception):
+    def forward(self, z, gripper, proprio):
         # Combine the GAT latent embeddings (z) with proprioception
-        x = torch.cat([z, gripper, proprioception], dim=-1)
+        x = torch.cat([z, gripper, proprio], dim=-1)
         return self.mlp(x)
 
 
@@ -1041,3 +1042,156 @@ for epoch in range(BC_EPOCHS):
         print(
             f"Baseline Epoch {epoch:03d}, Train MSE: {train_loss:.5f}, Val MSE: {val_loss:.5f}"
         )
+
+
+print("\n\n--- Phase 5: Live Simulator Benchmarking ---")
+
+
+def evaluate_graph_policy(gae_model, bc_model, num_episodes=100):
+    # Boot up the ManiSkill simulator in headless mode
+    env = gym.make(
+        "PickCube-v1",
+        obs_mode="state",
+        control_mode="pd_ee_delta_pos",
+        max_episode_steps=100,
+        render_mode="human",
+    )
+
+    gae_model.eval()
+    bc_model.eval()
+    successes = 0
+
+    print(f"Evaluating Graph Policy over {num_episodes} episodes...")
+    for seed in tqdm(range(num_episodes)):
+        obs, _ = env.reset(seed=seed)
+        done = False
+
+        while not done:
+            live_states = env.unwrapped.get_state_dict()
+
+            cube_xyz = live_states["actors"]["cube"][0, :3]
+            goal_xyz = live_states["actors"]["goal_site"][0, :3]
+            table_xyz = live_states["actors"]["table-workspace"][0, :3]
+            base_xyz = live_states["articulations"]["panda"][0, :3]
+            hand_xyz = obs[0, 18:21]
+
+            identities = np.eye(5)
+            nodes_list = [
+                np.concatenate([cube_xyz, identities[0]]),
+                np.concatenate([goal_xyz, identities[1]]),
+                np.concatenate([table_xyz, identities[2]]),
+                np.concatenate([base_xyz, identities[3]]),
+                np.concatenate([hand_xyz, identities[4]]),
+            ]
+            x = torch.tensor(np.array(nodes_list), dtype=torch.float).to(device)
+
+            edges = list(itertools.permutations(range(5), 2))
+            edge_index = (
+                torch.tensor(edges, dtype=torch.long).t().contiguous().to(device)
+            )
+
+            row, col = edge_index
+            src_xyz = x[row, :3]
+            dst_xyz = x[col, :3]
+            distances = (
+                torch.linalg.vector_norm(src_xyz - dst_xyz, ord=2, dim=1)
+                .view(-1, 1)
+                .to(device)
+            )
+
+            # Batch array of zeros (all nodes belong to the same single graph)
+            batch_idx = torch.zeros(5, dtype=torch.long).to(device)
+
+            with torch.no_grad():
+                z = gae_model.encode(x, edge_index, distances, batch_idx)
+
+                gripper = obs[0, 18:25].detach().clone().unsqueeze(0).to(device)
+                proprio = (
+                    live_states["articulations"]["panda"][0, 13:31]
+                    .detach()
+                    .clone()
+                    .unsqueeze(0)
+                    .to(device)
+                )
+
+                action = bc_model(z, gripper, proprio)
+                action = torch.clamp(action, -1.0, 1.0)
+
+            obs, reward, terminated, truncated, info = env.step(
+                action.cpu().numpy().squeeze()
+            )
+
+            env.render()
+
+            if info.get("success", False):
+                successes += 1
+                break
+
+            done = terminated or truncated
+
+    env.close()
+    sr = (successes / num_episodes) * 100
+    return sr
+
+
+def evaluate_baseline_policy(baseline_model, num_episodes=100):
+    env = gym.make(
+        "PickCube-v1",
+        obs_mode="state",
+        control_mode="pd_ee_delta_pos",
+        max_episode_steps=100,
+        render_mode="human",
+    )
+
+    baseline_model.eval()
+    successes = 0
+
+    print(f"Evaluating Baseline Policy over {num_episodes} episodes...")
+    for seed in tqdm(range(num_episodes)):
+        obs, _ = env.reset(seed=seed)
+        done = False
+
+        while not done:
+            live_states = env.unwrapped.get_state_dict()
+
+            cube = live_states["actors"]["cube"][0, :3]
+            goal = live_states["actors"]["goal_site"][0, :3]
+            table = live_states["actors"]["table-workspace"][0, :3]
+            base = live_states["articulations"]["panda"][0, :3]
+            gripper = obs[0, 18:25]
+            proprio = live_states["articulations"]["panda"][0, 13:31]
+
+            raw_state = np.concatenate([cube, goal, table, base, gripper, proprio])
+            raw_state_tensor = (
+                torch.tensor(raw_state, dtype=torch.float).unsqueeze(0).to(device)
+            )
+
+            with torch.no_grad():
+                action = baseline_model(raw_state_tensor)
+                action = torch.clamp(action, -1.0, 1.0)
+
+            obs, reward, terminated, truncated, info = env.step(
+                action.cpu().numpy().squeeze()
+            )
+
+            env.render()
+
+            if info.get("success", False):
+                successes += 1
+                break
+
+            done = terminated or truncated
+
+    env.close()
+    sr = (successes / num_episodes) * 100
+    return sr
+
+
+graph_sr = evaluate_graph_policy(model, policy)
+baseline_sr = evaluate_baseline_policy(baseline_policy)
+
+print("\n=====================================")
+print("FINAL RESULTS:")
+print(f"Graph-State Policy: {graph_sr}%")
+print(f"Baseline Policy:    {baseline_sr}%")
+print("=====================================")

@@ -13,7 +13,6 @@ from typing import Union
 from pathlib import Path
 from datetime import datetime
 from tqdm import tqdm
-import itertools
 
 import numpy as np
 import h5py

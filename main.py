@@ -68,18 +68,16 @@ REPLAYED_JS_PATH = DS_PATH / "trajectory.state.pd_ee_delta_pos.physx_cpu.json"
 EMBEDDINGS_JS_PATH = REPLAYED_JS_PATH.with_suffix(".embeddings.json")
 
 # These are to load/save checkpoints
-GAT_CHECKPOINT_PATH = (
-    script_location / "gatautoencoder_checkpoint_E4_2026-03-09T20:02:45.234847.pth"
-)
-BC_CHECKPOINT_PATH = (
-    script_location / "bc_policy_checkpoint_E19_2026-03-09T21:17:30.739075.pth"
-)
+GAT_CHECKPOINT_PATH = script_location / "gatautoencoder_best.pth"
+BC_CHECKPOINT_PATH = script_location / "bc_policy_best.pth"
+
+BENCHMARK = False
 
 # Generic Hyperparameters
 SPLIT_RATIO = 0.8
 
 # GNN Hyperparameters
-GAT_EPOCHS = 5
+GAT_EPOCHS = 15
 GAT_LR = 1e-3
 GAT_BATCH_SIZE = 64
 GAT_HIDDEN_CHANNELS = 32
@@ -87,7 +85,7 @@ GAT_LATENT_CHANNELS = 8
 GAT_ATTENTION_HEADS = 4
 
 # BC Hyperparameters
-BC_EPOCHS = 20
+BC_EPOCHS = 50
 BC_LR = 1e-3
 BC_BATCH_SIZE = 64
 BC_ACTION_DIM = 4
@@ -638,58 +636,52 @@ model = GATAutoencoder(
 optimizer = torch.optim.AdamW(model.parameters(), lr=GAT_LR)
 
 # Check for existence of checkpoint to resume/skip training
+best_val_loss = float("inf")
 if GAT_CHECKPOINT_PATH.exists():
     checkpoint = torch.load(GAT_CHECKPOINT_PATH)
     model.load_state_dict(checkpoint["model_state_dict"])
     optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
     start_epoch = checkpoint.get("epoch", -1) + 1
-    print(f"Loaded checkpoint from epoch {start_epoch}.")
+    best_val_loss = checkpoint.get("val_loss", float("inf"))
+    print(
+        f"Loaded checkpoint from epoch {start_epoch} with best val loss: {best_val_loss:.4f}"
+    )
 else:
     # Proceed with training from scratch
     start_epoch = 0
     print("No checkpoint found. Starting training from scratch.")
 
-# Quick check to find the dummy MSE to compare our model
-# train_xyz = torch.stack([data.x[:, :3] for data in train_dataset])
-# mean_node_positions = train_xyz.mean(dim=0)
-# val_xyz = torch.stack([data.x[:, :3] for data in val_dataset])
-# dummy_predictions = mean_node_positions.unsqueeze(0).expand_as(val_xyz)
-# dummy_loss = F.mse_loss(dummy_predictions, val_xyz)
-#
-# print("Dumb Baseline")
-# print(f"Average Node Positions (Cube, Goal, Table, Base, Hand):\n{mean_node_positions}")
-# print(f"Dumb Baseline Validation MSE: {dummy_loss.item():.6f}")
-
 # Loop
 for epoch in range(start_epoch, GAT_EPOCHS):
     train_loss = train_epoch(model, train_loader, optimizer, device)
     val_loss = validate(model, val_loader, device)
-    if epoch % 1 == 0:
-        print(
-            f"Epoch {epoch:03d}, Train MSE: {train_loss:.4f}, Val MSE: {val_loss:.4f}"
-        )
+    print(f"Epoch {epoch:03d}, Train MSE: {train_loss:.4f}, Val MSE: {val_loss:.4f}")
 
-# Save if we modified the model weights
-if start_epoch < GAT_EPOCHS:
-    checkpoint = {
-        "model_state_dict": model.state_dict(),
-        "optimizer_state_dict": optimizer.state_dict(),
-        "epoch": epoch,
-        "train_loss": train_loss,
-        "val_loss": val_loss,
-        "hyperparameters": {
-            "in_channels": in_channels,
-            "hidden_channels": GAT_HIDDEN_CHANNELS,
-            "latent_channels": GAT_LATENT_CHANNELS,
-            "batch_size": GAT_BATCH_SIZE,
-            "lr": GAT_LR,
-            "epochs": GAT_EPOCHS,
-        },
-    }
+    if val_loss < best_val_loss:
+        best_val_loss = val_loss
+        checkpoint = {
+            "model_state_dict": model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "epoch": epoch,
+            "train_loss": train_loss,
+            "val_loss": val_loss,
+            "hyperparameters": {
+                "in_channels": in_channels,
+                "hidden_channels": GAT_HIDDEN_CHANNELS,
+                "latent_channels": GAT_LATENT_CHANNELS,
+                "batch_size": GAT_BATCH_SIZE,
+                "lr": GAT_LR,
+                "epochs": GAT_EPOCHS,
+            },
+        }
+        torch.save(checkpoint, GAT_CHECKPOINT_PATH)
+        print(f"New best GAT model saved with Val MSE: {val_loss:.4f}")
 
-    # Get current timestamp (seconds since epoch)
-    torch.save(checkpoint, f"gatautoencoder_checkpoint_E{epoch}_{now.isoformat()}.pth")
-    print(f"Saved checkpoint at epoch {epoch} with timestamp {now.isoformat()}")
+# Load the best model weights for later phases
+if GAT_CHECKPOINT_PATH.exists():
+    print(f"Loading best GAT model from {GAT_CHECKPOINT_PATH}")
+    checkpoint = torch.load(GAT_CHECKPOINT_PATH)
+    model.load_state_dict(checkpoint["model_state_dict"])
 
 # Phase 3: Dataset Augmentation
 
@@ -975,13 +967,15 @@ policy = GraphStateBCPolicy(
 bc_optimizer = torch.optim.AdamW(policy.parameters(), lr=BC_LR)
 
 # Check for existence of a checkpoint and eventually load it
+best_bc_val_loss = float("inf")
 if BC_CHECKPOINT_PATH.exists():
     bc_checkpoint = torch.load(BC_CHECKPOINT_PATH)
     policy.load_state_dict(bc_checkpoint["model_state_dict"])
     bc_optimizer.load_state_dict(bc_checkpoint["optimizer_state_dict"])
     start_epoch = bc_checkpoint.get("epoch", -1) + 1
+    best_bc_val_loss = bc_checkpoint.get("val_loss", float("inf"))
     print(
-        f"Loaded BC checkpoint from epoch {start_epoch}. With:with losses: Train {bc_checkpoint.get('train_loss', 'N/A'):.5f}, Val {bc_checkpoint.get('val_loss', 'N/A'):.5f}"
+        f"Loaded BC checkpoint from epoch {start_epoch} with best val loss: {best_bc_val_loss:.5f}"
     )
 else:
     # Proceed with training from scratch
@@ -992,33 +986,36 @@ else:
 for epoch in range(start_epoch, BC_EPOCHS):
     train_loss = train_bc_epoch(policy, bc_train_loader, bc_optimizer, device)
     val_loss = validate_bc(policy, bc_val_loader, device)
-    if epoch % 1 == 0:
-        print(
-            f"BC Epoch {epoch:03d}, Train Action MSE: {train_loss:.5f}, Val Action MSE: {val_loss:.5f}"
-        )
+    print(
+        f"BC Epoch {epoch:03d}, Train Action MSE: {train_loss:.5f}, Val Action MSE: {val_loss:.5f}"
+    )
 
-# If the model got trained, save the new checkpoint
-if start_epoch < BC_EPOCHS:
-    bc_checkpoint = {
-        "model_state_dict": policy.state_dict(),
-        "optimizer_state_dict": bc_optimizer.state_dict(),
-        "epoch": epoch,
-        "train_loss": train_loss,
-        "val_loss": val_loss,
-        "hyperparameters": {
-            "z_dim": GAT_LATENT_CHANNELS,
-            "proprio_dim": BC_PROPRIO_DIM,
-            "action_dim": BC_ACTION_DIM,
-            "hidden_dim": BC_HIDDEN_DIM,
-            "batch_size": BC_BATCH_SIZE,
-            "lr": BC_LR,
-            "epochs": BC_EPOCHS,
-        },
-    }
+    if val_loss < best_bc_val_loss:
+        best_bc_val_loss = val_loss
+        bc_checkpoint = {
+            "model_state_dict": policy.state_dict(),
+            "optimizer_state_dict": bc_optimizer.state_dict(),
+            "epoch": epoch,
+            "train_loss": train_loss,
+            "val_loss": val_loss,
+            "hyperparameters": {
+                "z_dim": GAT_LATENT_CHANNELS,
+                "proprio_dim": BC_PROPRIO_DIM,
+                "action_dim": BC_ACTION_DIM,
+                "hidden_dim": BC_HIDDEN_DIM,
+                "batch_size": BC_BATCH_SIZE,
+                "lr": BC_LR,
+                "epochs": BC_EPOCHS,
+            },
+        }
+        torch.save(bc_checkpoint, BC_CHECKPOINT_PATH)
+        print(f"\t>New best BC model saved with Val MSE: {val_loss:.5f}")
 
-    # Get current timestamp (seconds since epoch)
-    torch.save(bc_checkpoint, f"bc_policy_checkpoint_E{epoch}_{now.isoformat()}.pth")
-    print(f"Saved checkpoint at epoch {epoch} with timestamp {now.isoformat()}")
+# Load the best model weights for later phases
+if BC_CHECKPOINT_PATH.exists():
+    print(f"Loading best BC model from {BC_CHECKPOINT_PATH}")
+    bc_checkpoint = torch.load(BC_CHECKPOINT_PATH)
+    policy.load_state_dict(bc_checkpoint["model_state_dict"])
 
 print("\n\n--- Phase 4.5: Baseline Benchmarking ---")
 
@@ -1084,18 +1081,19 @@ def validate_baseline(model, loader, device):
     return total_loss / len(loader.dataset)
 
 
-baseline_policy = BaselineBCPolicy().to(device)
-baseline_optimizer = torch.optim.AdamW(baseline_policy.parameters(), lr=BC_LR)
+if BENCHMARK:
+    baseline_policy = BaselineBCPolicy().to(device)
+    baseline_optimizer = torch.optim.AdamW(baseline_policy.parameters(), lr=BC_LR)
 
-for epoch in range(BC_EPOCHS):
-    train_loss = train_baseline_epoch(
-        baseline_policy, bc_train_loader, baseline_optimizer, device
-    )
-    val_loss = validate_baseline(baseline_policy, bc_val_loader, device)
-    if epoch % 1 == 0:
-        print(
-            f"Baseline Epoch {epoch:03d}, Train MSE: {train_loss:.5f}, Val MSE: {val_loss:.5f}"
+    for epoch in range(BC_EPOCHS):
+        train_loss = train_baseline_epoch(
+            baseline_policy, bc_train_loader, baseline_optimizer, device
         )
+        val_loss = validate_baseline(baseline_policy, bc_val_loader, device)
+        if epoch % 1 == 0:
+            print(
+                f"Baseline Epoch {epoch:03d}, Train MSE: {train_loss:.5f}, Val MSE: {val_loss:.5f}"
+            )
 
 
 print("\n\n--- Phase 5: Live Simulator Benchmarking ---")
@@ -1231,4 +1229,5 @@ def evaluate_baseline_policy(baseline_model, num_episodes=100):
 
 
 graph_sr = evaluate_graph_policy(model, policy)
-baseline_sr = evaluate_baseline_policy(baseline_policy)
+if BENCHMARK:
+    baseline_sr = evaluate_baseline_policy(baseline_policy)

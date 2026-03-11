@@ -77,10 +77,10 @@ BENCHMARK = False
 SPLIT_RATIO = 0.8
 
 # GNN Hyperparameters
-GAT_EPOCHS = 15
-GAT_LR = 1e-3
+GAT_EPOCHS = 10
+GAT_LR = 1e-4
 GAT_BATCH_SIZE = 64
-GAT_HIDDEN_CHANNELS = 32
+GAT_HIDDEN_CHANNELS = 64
 GAT_LATENT_CHANNELS = 8
 GAT_ATTENTION_HEADS = 4
 
@@ -91,7 +91,7 @@ BC_BATCH_SIZE = 64
 BC_ACTION_DIM = 4
 BC_PROPRIO_DIM = 18
 BC_GRIPPER_DIM = 7
-BC_HIDDEN_DIM = 64
+BC_HIDDEN_DIM = 256
 BC_RES_HIDDEN_DIM = 256
 
 # Phase 1: Scene Graph Engineering
@@ -419,6 +419,13 @@ def build_graph(dataset, idx):
     table_xyz = priv_states["actors"]["table-workspace"].squeeze()[:3]
     base_xyz = priv_states["articulations"]["panda"].squeeze()[:3]
 
+    # Bounding boxes
+    cube_box = np.array([0.04, 0.04, 0.04])
+    goal_box = np.array([0.04, 0.04, 0.04])
+    table_box = np.array([1.00, 1.00, 0.05])
+    base_box = np.array([0.20, 0.20, 0.20])
+    hand_box = np.array([0.10, 0.10, 0.10])
+
     # TCP is not available in the SAPIENS data, so we need to retrive it from obs
     # NOTE: Maybe this one not?
     hand_xyz = obs.squeeze()[18:21]
@@ -431,11 +438,11 @@ def build_graph(dataset, idx):
     # that it can achive low MSE by simply memorizing the tabl, base and goal positions.
     # A solution could be to enforce some arbitrary topology (see NOTE below), or tweak the latent dimension above?
     nodes_list = [
-        np.concatenate([cube_xyz, identities[0]]),
-        np.concatenate([goal_xyz, identities[1]]),
-        np.concatenate([table_xyz, identities[2]]),
-        np.concatenate([base_xyz, identities[3]]),
-        np.concatenate([hand_xyz, identities[4]]),
+        np.concatenate([cube_xyz, cube_box, identities[0]]),
+        np.concatenate([goal_xyz, goal_box, identities[1]]),
+        np.concatenate([table_xyz, table_box, identities[2]]),
+        np.concatenate([base_xyz, base_box, identities[3]]),
+        np.concatenate([hand_xyz, hand_box, identities[4]]),
     ]
     x = torch.tensor(np.array(nodes_list), dtype=torch.float)
 
@@ -487,8 +494,13 @@ Ensure the embedding z is expressive enough to reconstruct the scene geometry ac
 
 # NOTE: I could also implment a second head for reconstructing edge_index or adjacency matrix? For now not really since it is fully connected, but maybe?
 class GATAutoencoder(nn.Module):
-    def __init__(self, in_channels, hidden_channels, latent_channels, heads):
+    def __init__(
+        self, in_channels, hidden_channels, latent_channels, heads, feature_size=3
+    ):
         super().__init__()
+        self.feature_size = (
+            feature_size  # Number of features per node, identity excluded (e.g., XYZ)
+        )
 
         # ENCODER: graph -> hidden -> latent
         self.encoder_conv1 = GATConv(
@@ -502,7 +514,9 @@ class GATAutoencoder(nn.Module):
         self.decoder = nn.Sequential(
             nn.Linear(latent_channels + 5, hidden_channels),  # 5 is the number of nodes
             nn.ReLU(),
-            nn.Linear(hidden_channels, 3),  # We only want to predict the 3 XYZ coords
+            nn.Linear(
+                hidden_channels, feature_size
+            ),  # We only want to predict the 3 XYZ coords
         )
 
     def encode(self, x, edge_index, edge_attr, batch):
@@ -522,7 +536,7 @@ class GATAutoencoder(nn.Module):
         z_expanded = global_z[data.batch]
 
         # Give the decoder the encoded latent vector (z) and the node identities (values of x after the first 3 columns XYZ)
-        identities = data.x[:, 3:]
+        identities = data.x[:, self.feature_size :]
         dec_input = torch.cat([z_expanded, identities], dim=-1)
 
         # Predict XYZ
@@ -550,7 +564,7 @@ def train_epoch(model, loader, optimizer, device):
         out, _ = model(data)
 
         # Loss (Target is only the first 3 columns (XYZ) since the remaning are the identities)
-        target_xyz = data.x[:, :3]
+        target_xyz = data.x[:, : model.feature_size]
         loss = F.mse_loss(out, target_xyz)
 
         # Backward pass
@@ -575,7 +589,7 @@ def validate(model, loader, device):
         out, _ = model(data)
 
         # Loss (Target is only the first 3 columns (XYZ) since the remaning are the identities)
-        target_xyz = data.x[:, :3]
+        target_xyz = data.x[:, : model.feature_size]
         loss = F.mse_loss(out, target_xyz)
 
         # To have a proper loss printing, we weight this for the size of the batch
@@ -632,6 +646,7 @@ model = GATAutoencoder(
     hidden_channels=GAT_HIDDEN_CHANNELS,
     latent_channels=GAT_LATENT_CHANNELS,
     heads=GAT_ATTENTION_HEADS,
+    feature_size=6,
 ).to(device)
 optimizer = torch.optim.AdamW(model.parameters(), lr=GAT_LR)
 
@@ -811,6 +826,21 @@ Latent State: The GAE scene embedding z.
 Benchmarking: Compare the success rate of the Graph-State Policy against a baseline trained on raw, flat privileged coordinates.
 """
 
+# In ManiSkill examples, the PickCube-v1 task is addressed using three primary architectures:
+#
+#
+#   1. Behavioral Cloning (BC)
+#      A MLP with two hidden layers of 256 units and ReLU activations
+#      Uses a custom PlainConv visual encoder consisting of five convolutional layers (with ReLU and
+#      MaxPool) to process RGB-D images
+#      The resulting visual features are concatenated with the robot's state and
+#      passed
+#   2. Action Chunking with Transformers (ACT)
+#   3. Diffusion Policy
+#
+#   See examples/baselines/bc, examples/baselines/act, and examples/baselines/diffusion_policy respectively,
+#   with specific scripts like bc.py, train.py, and train_rgbd.py providing the configurations for the PickCube-v1 task.
+
 
 class GraphStateBCPolicy(nn.Module):
     """A lightweight MLP to predict actions sequentially"""
@@ -832,7 +862,7 @@ class GraphStateBCPolicy(nn.Module):
 
 
 class ResBlock(nn.Module):
-    def __init__(self, dim, p=0.1):
+    def __init__(self, dim, p=0.0):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(dim, dim),
@@ -858,7 +888,6 @@ class ResNetGraphStateBCPolicy(nn.Module):
             ResBlock(hidden_dim),
             ResBlock(hidden_dim),
             ResBlock(hidden_dim),
-            ResBlock(hidden_dim),
         )
 
         self.output_layer = nn.Linear(hidden_dim, action_dim)
@@ -870,7 +899,7 @@ class ResNetGraphStateBCPolicy(nn.Module):
         return self.output_layer(x)
 
 
-def train_bc_epoch(model, loader, optimizer, device):
+def train_bc_epoch(model, loader, optimizer, scheduler, device, noise_std=0.01):
     model.train()
     total_loss = 0
     for batch in loader:
@@ -881,8 +910,13 @@ def train_bc_epoch(model, loader, optimizer, device):
         target_action = batch["action"].to(device)
         optimizer.zero_grad()
 
+        # Data augmentation
+        z_noise = z + torch.randn_like(z) * noise_std
+        gripper_noise = gripper + torch.randn_like(gripper) * (noise_std * 0.5)
+        proprio_noise = proprio + torch.randn_like(proprio) * noise_std
+
         # Forward pass
-        out = model(z, gripper, proprio)
+        out = model(z_noise, gripper_noise, proprio_noise)
 
         # Loss
         loss = F.mse_loss(out, target_action)
@@ -893,6 +927,9 @@ def train_bc_epoch(model, loader, optimizer, device):
 
         # To have a proper loss printing, we weight this for the size of the batch
         total_loss += loss.item() * z.size(0)
+
+    if scheduler is not None:
+        scheduler.step()
 
     return total_loss / len(loader.dataset)
 
@@ -948,23 +985,24 @@ bc_val_loader = TorchDataLoader(bc_val_dataset, batch_size=BC_BATCH_SIZE)
 
 # Prepare the model, optmizer etc.
 
-policy = GraphStateBCPolicy(
-    z_dim=GAT_LATENT_CHANNELS,
-    proprio_dim=BC_PROPRIO_DIM,
-    gripper_dim=BC_GRIPPER_DIM,
-    action_dim=BC_ACTION_DIM,
-    hidden_dim=BC_HIDDEN_DIM,
-).to(device)
-
-# policy = ResNetGraphStateBCPolicy(
+# policy = GraphStateBCPolicy(
 #    z_dim=GAT_LATENT_CHANNELS,
 #    proprio_dim=BC_PROPRIO_DIM,
 #    gripper_dim=BC_GRIPPER_DIM,
 #    action_dim=BC_ACTION_DIM,
-#    hidden_dim=BC_RES_HIDDEN_DIM,
+#    hidden_dim=BC_HIDDEN_DIM,
 # ).to(device)
 
+policy = ResNetGraphStateBCPolicy(
+    z_dim=GAT_LATENT_CHANNELS,
+    proprio_dim=BC_PROPRIO_DIM,
+    gripper_dim=BC_GRIPPER_DIM,
+    action_dim=BC_ACTION_DIM,
+    hidden_dim=BC_RES_HIDDEN_DIM,
+).to(device)
+
 bc_optimizer = torch.optim.AdamW(policy.parameters(), lr=BC_LR)
+bc_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(bc_optimizer, T_max=BC_EPOCHS)
 
 # Check for existence of a checkpoint and eventually load it
 best_bc_val_loss = float("inf")
@@ -984,7 +1022,9 @@ else:
 
 # Train the model for the missing epochs
 for epoch in range(start_epoch, BC_EPOCHS):
-    train_loss = train_bc_epoch(policy, bc_train_loader, bc_optimizer, device)
+    train_loss = train_bc_epoch(
+        policy, bc_train_loader, bc_optimizer, bc_scheduler, device
+    )
     val_loss = validate_bc(policy, bc_val_loader, device)
     print(
         f"BC Epoch {epoch:03d}, Train Action MSE: {train_loss:.5f}, Val Action MSE: {val_loss:.5f}"

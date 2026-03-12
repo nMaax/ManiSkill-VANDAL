@@ -345,7 +345,7 @@ def print_dict_tree(data, indent=""):
 # For this reason The "Hand" (or Tool Center Point - TCP) is not a physics object tracked.
 # It is an imaginary geometric point floating between the two gripper fingers.
 # To find out where the hand actually is in 3D space, you have to run Forward Kinematics—multiplying all 9 joint angles through a complex kinematic tree.
-# ManiSkill's know that every researcher needs the Hand XYZ, so the environment automatically runs that math for you on every frame and injects the result into the obs array
+# ManiSkill's environment automatically runs that math and injects the result into the obs array, i.e.:
 #
 #   Indices,    Size,   Description
 #
@@ -419,7 +419,7 @@ def build_graph(dataset, idx):
     table_xyz = priv_states["actors"]["table-workspace"].squeeze()[:3]
     base_xyz = priv_states["articulations"]["panda"].squeeze()[:3]
 
-    # Bounding boxes
+    # Bounding boxes, XXX: check later if correct
     cube_box = np.array([0.04, 0.04, 0.04])
     goal_box = np.array([0.04, 0.04, 0.04])
     table_box = np.array([1.00, 1.00, 0.05])
@@ -492,7 +492,7 @@ Ensure the embedding z is expressive enough to reconstruct the scene geometry ac
 """
 
 
-# NOTE: I could also implment a second head for reconstructing edge_index or adjacency matrix? For now not really since it is fully connected, but maybe?
+# NOTE: I could also implment a second head for reconstructing edge_index or adjacency matrix?
 class GATAutoencoder(nn.Module):
     def __init__(
         self, in_channels, hidden_channels, latent_channels, heads, feature_size=3
@@ -618,12 +618,12 @@ episode_lengths = get_all_episode_lengths(REPLAYED_JS_PATH)
 # If random splitting puts Frame 45 in your Train Set and Frame 46 in your Validation Set, your Validation MSE will drop to near zero
 # Train Set: Episodes 0 to 800 (contains all their frames)
 # Validation Set: Episodes 800 to 1000 (contains all their frames)
+# WARNING: We should do the same exact split for the BC policy later
 
 # Create a list of Data objects using build_graph function
 data_list = [build_graph(dataset, i) for i in range(len(dataset))]
 
 # Extract splitting index over dataset (remind dataset is a flatten sequence of episode's frame, so we need to reconstruct the frame that divides the 80/20 of episodes)
-# WARNING: We do the same exact split for the BC policy later, this is safe right?
 episode_lengths = get_all_episode_lengths(JS_PATH)
 num_train_episodes = int(SPLIT_RATIO * len(episode_lengths))
 split_idx = sum(episode_lengths[:num_train_episodes])
@@ -828,7 +828,6 @@ Benchmarking: Compare the success rate of the Graph-State Policy against a basel
 
 # In ManiSkill examples, the PickCube-v1 task is addressed using three primary architectures:
 #
-#
 #   1. Behavioral Cloning (BC)
 #      A MLP with two hidden layers of 256 units and ReLU activations
 #      Uses a custom PlainConv visual encoder consisting of five convolutional layers (with ReLU and
@@ -839,10 +838,10 @@ Benchmarking: Compare the success rate of the Graph-State Policy against a basel
 #   3. Diffusion Policy
 #
 #   See examples/baselines/bc, examples/baselines/act, and examples/baselines/diffusion_policy respectively,
-#   with specific scripts like bc.py, train.py, and train_rgbd.py providing the configurations for the PickCube-v1 task.
+#   with specific scripts like bc.py, train.py, and train_rgbd.py providing the configurations for the PickCube-v1 task
 
 
-class GraphStateBCPolicy(nn.Module):
+class MLPGraphStateBCPolicy(nn.Module):
     """A lightweight MLP to predict actions sequentially"""
 
     def __init__(self, z_dim, proprio_dim, gripper_dim, action_dim, hidden_dim):
@@ -873,7 +872,7 @@ class ResBlock(nn.Module):
         )
 
     def forward(self, x):
-        return x + self.net(x)  # The Skip Connection
+        return x + self.net(x)
 
 
 class ResNetGraphStateBCPolicy(nn.Module):
@@ -883,7 +882,6 @@ class ResNetGraphStateBCPolicy(nn.Module):
 
         self.input_layer = nn.Linear(input_dim, hidden_dim)
 
-        # Stack 3 Residual Blocks for deep reasoning
         self.res_stack = nn.Sequential(
             ResBlock(hidden_dim),
             ResBlock(hidden_dim),
@@ -985,7 +983,7 @@ bc_val_loader = TorchDataLoader(bc_val_dataset, batch_size=BC_BATCH_SIZE)
 
 # Prepare the model, optmizer etc.
 
-# policy = GraphStateBCPolicy(
+# policy = MLPGraphStateBCPolicy(
 #    z_dim=GAT_LATENT_CHANNELS,
 #    proprio_dim=BC_PROPRIO_DIM,
 #    gripper_dim=BC_GRIPPER_DIM,

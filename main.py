@@ -74,7 +74,7 @@ EMBEDDINGS_JS_PATH = REPLAYED_JS_PATH.with_suffix(".embeddings.json")
 
 # These are to load/save checkpoints
 GAT_CHECKPOINT_PATH = script_location / "gatautoencoder_best.pth"
-BC_CHECKPOINT_PATH = script_location / "bc_policy_best.pth"
+BC_CHECKPOINT_PATH = script_location / "bc_mlp_policy_best.pth"
 BASELINE_CHECKPOINT_PATH = script_location / "baseline_policy_best.pth"
 
 BENCHMARK = True
@@ -100,8 +100,6 @@ BC_ACTION_DIM = 4
 BC_PROPRIO_DIM = 18
 BC_GRIPPER_DIM = 7
 BC_HIDDEN_DIM = 256
-BC_RES_HIDDEN_DIM = 256
-BC_RES_DROPOUT = 0.1
 
 # %% *** Phase 1: Scene Graph Engineering ***
 
@@ -822,45 +820,6 @@ class MLPGraphStateBCPolicy(nn.Module):
         return self.mlp(x)
 
 
-class ResBlock(nn.Module):
-    def __init__(self, dim, p):
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(dim, dim),
-            nn.LayerNorm(dim),
-            nn.ReLU(),
-            nn.Dropout(p),
-            nn.Linear(dim, dim),
-        )
-
-    def forward(self, x):
-        return x + self.net(x)
-
-
-class ResNetGraphStateBCPolicy(nn.Module):
-    def __init__(
-        self, z_dim, proprio_dim, gripper_dim, action_dim, hidden_dim, dropout_p
-    ):
-        super().__init__()
-        input_dim = z_dim + proprio_dim + gripper_dim
-
-        self.input_layer = nn.Linear(input_dim, hidden_dim)
-
-        self.res_stack = nn.Sequential(
-            ResBlock(hidden_dim, dropout_p),
-            ResBlock(hidden_dim, dropout_p),
-            ResBlock(hidden_dim, dropout_p),
-        )
-
-        self.output_layer = nn.Linear(hidden_dim, action_dim)
-
-    def forward(self, z, gripper, proprioception):
-        x = torch.cat([z, gripper, proprioception], dim=-1)
-        x = F.relu(self.input_layer(x))
-        x = self.res_stack(x)
-        return self.output_layer(x)
-
-
 def train_bc_epoch(model, loader, optimizer, scheduler, device, noise_std=0.01):
     model.train()
     total_loss = 0
@@ -948,22 +907,14 @@ bc_val_loader = TorchDataLoader(bc_val_dataset, batch_size=BC_BATCH_SIZE)
 
 # Prepare the model, optmizer etc.
 
-# policy = MLPGraphStateBCPolicy(
-#    z_dim=GAT_LATENT_CHANNELS,
-#    proprio_dim=BC_PROPRIO_DIM,
-#    gripper_dim=BC_GRIPPER_DIM,
-#    action_dim=BC_ACTION_DIM,
-#    hidden_dim=BC_HIDDEN_DIM,
-# ).to(device)
-
-policy = ResNetGraphStateBCPolicy(
+policy = MLPGraphStateBCPolicy(
     z_dim=GAT_LATENT_CHANNELS,
     proprio_dim=BC_PROPRIO_DIM,
     gripper_dim=BC_GRIPPER_DIM,
     action_dim=BC_ACTION_DIM,
-    hidden_dim=BC_RES_HIDDEN_DIM,
-    dropout_p=BC_RES_DROPOUT,
+    hidden_dim=BC_HIDDEN_DIM,
 ).to(device)
+
 
 bc_optimizer = torch.optim.AdamW(policy.parameters(), lr=BC_LR)
 bc_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(bc_optimizer, T_max=BC_EPOCHS)

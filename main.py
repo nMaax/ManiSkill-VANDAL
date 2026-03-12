@@ -98,11 +98,6 @@ BC_RES_HIDDEN_DIM = 256
 
 print("\n\n--- Phase 1: Data extraction ---")
 
-# Data Extraction:
-"""
-Parse the privileged states from the IL dataset (e.g., object XYZ, bounding boxes, gripper pose).
-"""
-
 
 # loads h5 data into memory for faster access
 def load_h5_data(data):
@@ -299,6 +294,8 @@ def print_dict_tree(data, indent=""):
             print(f"{indent}{branch}{key}: {type(value).__name__}")
 
 
+print_dict_tree(dataset[0])
+
 # ** Privilege states **
 #
 # Note that `env_states` is simply a direct memory dump from the underlying SAPIENS engine
@@ -373,16 +370,8 @@ def print_dict_tree(data, indent=""):
 #       https://maniskill.readthedocs.io/en/v3.0.0b10/_modules/mani_skill/envs/sapien_env.html#BaseEnv.get_obs
 #       https://maniskill.readthedocs.io/en/latest/_modules/mani_skill/agents/base_agent.html#BaseAgent.get_proprioception
 #       https://maniskill.readthedocs.io/en/latest/_modules/mani_skill/envs/tasks/tabletop/pick_cube.html#PickCubeEnv._get_obs_extra
-
-print_dict_tree(dataset[0])
-
-# Graph Construction:
-"""
-Nodes: Objects and gripper(s) with spatial features.
-Edges: Spatial relationships defined by Euclidean distances.
-Implementation: Build a preprocessing script to convert flat state vectors into graph structures (adjacency matrices + feature tensors).
-"""
-
+#
+#
 # Table is always the same thorugh all episodes, and for all frames of the episode
 # Goal instead may change between episodes, but within the same is constant
 # Cube always change obv, articulations as well
@@ -479,17 +468,9 @@ def build_graph(dataset, idx):
 print(build_graph(dataset, 0))
 
 
-# Phase 2: Representation Learning (The GAE)
+# *** Phase 2: Representation Learning ***
 
 print("\n\n--- Phase 2: Representation Learning ---")
-
-
-# Architecture:
-"""
-Design a GNN-based Auto-Encoder (GCN or GAT).
-Compress the graph into a fixed-length latent vector z.
-Ensure the embedding z is expressive enough to reconstruct the scene geometry accurately.
-"""
 
 
 # NOTE: I could also implment a second head for reconstructing edge_index or adjacency matrix?
@@ -698,16 +679,9 @@ if GAT_CHECKPOINT_PATH.exists():
     checkpoint = torch.load(GAT_CHECKPOINT_PATH)
     model.load_state_dict(checkpoint["model_state_dict"])
 
-# Phase 3: Dataset Augmentation
+# *** Phase 3: Dataset Augmentation ***
 
 print("\n\n--- Phase 3: Dataset Augmentation ---")
-
-
-# Encoding:
-"""
-Pass the entire IL dataset through the frozen GAE encoder.
-Save the resulting embeddings as a new key in the dataset (HDF5/Zarr).
-"""
 
 
 def compute_and_store_embeddings(model, base_h5_path, output_h5_path):
@@ -775,11 +749,6 @@ print(
 # Try it out
 print_dict_tree(embeddings_dataset[0])
 
-# Smoothing:
-"""
-Verify temporal consistency of embeddings across trajectory frames.
-"""
-
 
 def compute_trajectory_embeddings_similarity(trajectory_embeddings):
     # trajectory_embeddings shape: [T, 16]
@@ -811,20 +780,9 @@ for i in range(5):
     start_idx += episode_len
 print()
 
-# Phase 4: Policy Training & Evaluation
+# *** Phase 4: Policy Training & Evaluation ***
 
 print("\n\n--- Phase 4: Policy Training & Evaluation ---")
-
-
-"""
-State Input: Train an IL policy (BC) using a concatenated state:
-
-Proprioception: (Joint positions, gripper state).
-
-Latent State: The GAE scene embedding z.
-
-Benchmarking: Compare the success rate of the Graph-State Policy against a baseline trained on raw, flat privileged coordinates.
-"""
 
 # In ManiSkill examples, the PickCube-v1 task is addressed using three primary architectures:
 #
@@ -960,6 +918,7 @@ def validate_bc(model, loader, device):
 # If random splitting puts Frame 45 in your Train Set and Frame 46 in your Validation Set, your Validation MSE will drop to near zero
 # Train Set: Episodes 0 to 800 (contains all their frames)
 # Validation Set: Episodes 800 to 1000 (contains all their frames)
+# WARNING: must be the same split of the GNN
 
 # Find the splitting index, as done before
 episode_lengths = get_all_episode_lengths(EMBEDDINGS_JS_PATH)
@@ -1055,7 +1014,7 @@ if BC_CHECKPOINT_PATH.exists():
     bc_checkpoint = torch.load(BC_CHECKPOINT_PATH)
     policy.load_state_dict(bc_checkpoint["model_state_dict"])
 
-print("\n\n--- Phase 4.5: Baseline Benchmarking ---")
+print("\n\n--- Phase 4.1: Baseline Benchmarking ---")
 
 
 class BaselineBCPolicy(nn.Module):
@@ -1134,11 +1093,10 @@ if BENCHMARK:
             )
 
 
-print("\n\n--- Phase 5: Live Simulator Benchmarking ---")
+print("\n\n--- Phase 4.2: Live Simulator Benchmarking ---")
 
 
 def evaluate_graph_policy(gae_model, bc_model, num_episodes=100):
-    # Boot up the ManiSkill simulator in headless mode
     env = gym.make(
         "PickCube-v1",
         obs_mode="state",

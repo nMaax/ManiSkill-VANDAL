@@ -357,9 +357,15 @@ print_dict_tree(dataset[0])
 #
 #   [0:9],      9,      qpos: Joint Angles (7 arm joints + 2 gripper fingers) -> SAME AS ENV_STATE
 #   [9:18],     9,      qvel: Joint Velocities -> SAME AS ENV_STATE
-#   [18:21],    3,      "tcp_pose (Position): X, Y, Z"
-#   [21:25],    4,      "tcp_pose (Quaternion): W, X, Y, Z"
-#   [25:42],    17,     "Other Task-specific data (ignore for now, documentation say it shall be goal_site or something, but this looks strangely too long for that)"
+#   []          0,      controller (often empty)
+#   [18]        1,      is_grasped: bool
+#   [19:22],    3,      tcp_pose (Position): X, Y, Z
+#   [22:26],    4,      tcp_pose (Quaternion): W, X, Y, Z
+#   [26:29]     3,      goal_pose (Position only): X, Y, Z
+#   [29:42],    13,      Other Task-specific data, only included if "state" in obs_mode:
+#                           "obj_pose": raw_pose,                         # Shape: (batch_size, 7) - Cube pose [x, y, z, qx, qy, qz, qw]
+#                           "tcp_to_obj_pos": tensor,                     # Shape: (batch_size, 3) - Vector from TCP to cube
+#                           "obj_to_goal_pos": tensor,                    # Shape: (batch_size, 3) - Vector from cube to goal
 #
 # Indeed, we can run:
 #
@@ -373,12 +379,33 @@ print_dict_tree(dataset[0])
 #
 # And they will be identical
 #
+# Same goes for
+#
+# Get Frame 999, then slice over the cube pose (position and quaternon)
+# data['traj_999']['env_states']['actors']['cube'][:5, :7]
+#
+# and
+#
+# Get Frame 999, then slice over observations for obj_pose
+# data['traj_999']['obs'][:5, 29:36]
+#
+# As well as
+#
+# Get Frame 999, goal site XYZ
+# data['traj_999']['env_states']['actors']['goal_site'][:5, :3]
+#
+# againsts
+#
+# Get Frame 999, goal_pose (no quaternon)
+# data['traj_999']['obs'][:5, 26:29]
+#
 # Reference:
 #
 #       https://maniskill.readthedocs.io/en/latest/user_guide/concepts/observation.html#state-dict
 #       https://maniskill.readthedocs.io/en/v3.0.0b10/_modules/mani_skill/envs/sapien_env.html#BaseEnv.get_obs
 #       https://maniskill.readthedocs.io/en/latest/_modules/mani_skill/agents/base_agent.html#BaseAgent.get_proprioception
 #       https://maniskill.readthedocs.io/en/latest/_modules/mani_skill/envs/tasks/tabletop/pick_cube.html#PickCubeEnv._get_obs_extra
+#       See mani_skill/envs/tasks/tabletop/pick_cube.py#L132-L145 for what values are returned as extras in obs
 #
 #
 # Table is always the same thorugh all episodes, and for all frames of the episode
@@ -417,16 +444,25 @@ def build_graph(dataset, idx):
     table_xyz = priv_states["actors"]["table-workspace"].squeeze()[:3]
     base_xyz = priv_states["articulations"]["panda"].squeeze()[:3]
 
-    # Bounding boxes, XXX: check later if correct
-    cube_box = np.array([0.04, 0.04, 0.04])
-    goal_box = np.array([0.04, 0.04, 0.04])
-    table_box = np.array([1.00, 1.00, 0.05])
-    base_box = np.array([0.20, 0.20, 0.20])
-    hand_box = np.array([0.10, 0.10, 0.10])
-
     # TCP is not available in the SAPIENS data, so we need to retrive it from obs
     # NOTE: Maybe this one not?
-    hand_xyz = obs.squeeze()[18:21]
+    hand_xyz = obs.squeeze()[19:22]
+
+    # Bounding boxes
+    # Reference:
+    #   https://github.com/haosulab/ManiSkill/blob/main/mani_skill/envs/tasks/tabletop/pick_cube_cfgs.py
+    #   https://github.com/haosulab/ManiSkill/blob/main/mani_skill/utils/scene_builder/table/scene_builder.py
+    cube_box = np.array(
+        [0.04, 0.04, 0.04]
+    )  # see cube_half_size variable in pick_cube_cfgs.py, which is set to 0.02
+    goal_box = np.array(
+        [0.05, 0.05, 0.05]
+    )  # goal_tresh is 0.025 by default, see pick_cube_cfgs.py
+    table_box = np.array(
+        [1.21, 2.42, 0.92]
+    )  # always set so the surface is at z=0, see aabb and below rows in table/scene_builder.py
+    base_box = np.array([0.20, 0.20, 0.20])  # educated guess(?)
+    hand_box = np.array([0.10, 0.05, 0.10])  # educated guess(?)
 
     # Build One-Hot Identities
     identities = np.eye(5)
@@ -466,6 +502,7 @@ def build_graph(dataset, idx):
     dst_xyz = x[col, :3]
 
     # Calculate the L2 Norm (Euclidean distance) between them
+    # NOTE: I could actually leverage those 6 last elements in obs_extras to improve this
     distances = torch.linalg.vector_norm(src_xyz - dst_xyz, ord=2, dim=1)
     distances = distances.view(-1, 1)
 
@@ -848,7 +885,7 @@ def train_bc_epoch(model, loader, optimizer, scheduler, device, noise_std=0.01):
     for batch in loader:
         # Load data on device and reset the gradients
         z = batch["priv_states"]["embeddings"].to(device)
-        gripper = batch["obs"][:, 18:25].to(device)  # Gripper state
+        gripper = batch["obs"][:, 19:26].to(device)  # Gripper state
         proprio = batch["priv_states"]["articulations"]["panda"][:, 13:31].to(device)
         target_action = batch["action"].to(device)
         optimizer.zero_grad()
@@ -884,7 +921,7 @@ def validate_bc(model, loader, device):
     for batch in loader:
         # Load data on device
         z = batch["priv_states"]["embeddings"].to(device)
-        gripper = batch["obs"][:, 18:25].to(device)  # Gripper state
+        gripper = batch["obs"][:, 19:26].to(device)  # Gripper state
         proprio = batch["priv_states"]["articulations"]["panda"][:, 13:31].to(device)
         target_action = batch["action"].to(device)
 
@@ -1016,14 +1053,15 @@ def train_baseline_epoch(model, loader, optimizer, device, noise_std):
     model.train()
     total_loss = 0
     for batch in loader:
+        # In place of z
         cube = batch["priv_states"]["actors"]["cube"][:, :3].to(device)
         goal = batch["priv_states"]["actors"]["goal_site"][:, :3].to(device)
         table = batch["priv_states"]["actors"]["table-workspace"][:, :3].to(device)
         base = batch["priv_states"]["articulations"]["panda"][:, :3].to(device)
 
-        gripper = batch["obs"][:, 18:25].to(device)
+        # As before
+        gripper = batch["obs"][:, 19:26].to(device)
         proprio = batch["priv_states"]["articulations"]["panda"][:, 13:31].to(device)
-
         target_action = batch["action"].to(device)
 
         raw_state = torch.cat([cube, goal, table, base, gripper, proprio], dim=-1)
@@ -1048,7 +1086,7 @@ def validate_baseline(model, loader, device):
         goal = batch["priv_states"]["actors"]["goal_site"][:, :3].to(device)
         table = batch["priv_states"]["actors"]["table-workspace"][:, :3].to(device)
         base = batch["priv_states"]["articulations"]["panda"][:, :3].to(device)
-        gripper = batch["obs"][:, 18:25].to(device)
+        gripper = batch["obs"][:, 19:26].to(device)
         proprio = batch["priv_states"]["articulations"]["panda"][:, 13:31].to(device)
 
         raw_state = torch.cat([cube, goal, table, base, gripper, proprio], dim=-1)
@@ -1166,7 +1204,7 @@ def evaluate_graph_policy(gae_model, bc_model, num_episodes=100):
             with torch.no_grad():
                 z = gae_model.encode(x, edge_index, edge_attr, batch_idx)
 
-                gripper = obs[0, 18:25].detach().clone().unsqueeze(0).to(device)
+                gripper = obs[0, 19:26].detach().clone().unsqueeze(0).to(device)
                 proprio = (
                     live_states["articulations"]["panda"][0, 13:31]
                     .detach()
@@ -1221,7 +1259,7 @@ def evaluate_baseline_policy(baseline_model, num_episodes=100):
             goal = live_states["actors"]["goal_site"][0, :3]
             table = live_states["actors"]["table-workspace"][0, :3]
             base = live_states["articulations"]["panda"][0, :3]
-            gripper = obs[0, 18:25]
+            gripper = obs[0, 19:26]
             proprio = live_states["articulations"]["panda"][0, 13:31]
 
             raw_state = np.concatenate([cube, goal, table, base, gripper, proprio])

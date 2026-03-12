@@ -70,11 +70,13 @@ EMBEDDINGS_JS_PATH = REPLAYED_JS_PATH.with_suffix(".embeddings.json")
 # These are to load/save checkpoints
 GAT_CHECKPOINT_PATH = script_location / "gatautoencoder_best.pth"
 BC_CHECKPOINT_PATH = script_location / "bc_policy_best.pth"
+BASELINE_CHECKPOINT_PATH = script_location / "baseline_policy_best.pth"
 
-BENCHMARK = False
+BENCHMARK = True
 
 # Generic Hyperparameters
 SPLIT_RATIO = 0.8
+NOISE_STD = 0.01
 
 # GNN Hyperparameters
 GAT_EPOCHS = 10
@@ -93,6 +95,7 @@ BC_PROPRIO_DIM = 18
 BC_GRIPPER_DIM = 7
 BC_HIDDEN_DIM = 256
 BC_RES_HIDDEN_DIM = 256
+BC_RES_DROPOUT = 0.1
 
 # Phase 1: Scene Graph Engineering
 
@@ -819,7 +822,7 @@ class MLPGraphStateBCPolicy(nn.Module):
 
 
 class ResBlock(nn.Module):
-    def __init__(self, dim, p=0.0):
+    def __init__(self, dim, p):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(dim, dim),
@@ -834,16 +837,18 @@ class ResBlock(nn.Module):
 
 
 class ResNetGraphStateBCPolicy(nn.Module):
-    def __init__(self, z_dim, proprio_dim, gripper_dim, action_dim, hidden_dim):
+    def __init__(
+        self, z_dim, proprio_dim, gripper_dim, action_dim, hidden_dim, dropout_p
+    ):
         super().__init__()
         input_dim = z_dim + proprio_dim + gripper_dim
 
         self.input_layer = nn.Linear(input_dim, hidden_dim)
 
         self.res_stack = nn.Sequential(
-            ResBlock(hidden_dim),
-            ResBlock(hidden_dim),
-            ResBlock(hidden_dim),
+            ResBlock(hidden_dim, dropout_p),
+            ResBlock(hidden_dim, dropout_p),
+            ResBlock(hidden_dim, dropout_p),
         )
 
         self.output_layer = nn.Linear(hidden_dim, action_dim)
@@ -956,6 +961,7 @@ policy = ResNetGraphStateBCPolicy(
     gripper_dim=BC_GRIPPER_DIM,
     action_dim=BC_ACTION_DIM,
     hidden_dim=BC_RES_HIDDEN_DIM,
+    dropout_p=BC_RES_DROPOUT,
 ).to(device)
 
 bc_optimizer = torch.optim.AdamW(policy.parameters(), lr=BC_LR)
@@ -980,7 +986,7 @@ else:
 # Train the model for the missing epochs
 for epoch in range(start_epoch, BC_EPOCHS):
     train_loss = train_bc_epoch(
-        policy, bc_train_loader, bc_optimizer, bc_scheduler, device
+        policy, bc_train_loader, bc_optimizer, bc_scheduler, device, noise_std=NOISE_STD
     )
     val_loss = validate_bc(policy, bc_val_loader, device)
     print(
@@ -1032,7 +1038,7 @@ class BaselineBCPolicy(nn.Module):
         return self.mlp(raw_state)
 
 
-def train_baseline_epoch(model, loader, optimizer, device):
+def train_baseline_epoch(model, loader, optimizer, device, noise_std):
     model.train()
     total_loss = 0
     for batch in loader:
@@ -1044,11 +1050,13 @@ def train_baseline_epoch(model, loader, optimizer, device):
         gripper = batch["obs"][:, 18:25].to(device)
         proprio = batch["priv_states"]["articulations"]["panda"][:, 13:31].to(device)
 
-        raw_state = torch.cat([cube, goal, table, base, gripper, proprio], dim=-1)
         target_action = batch["action"].to(device)
 
+        raw_state = torch.cat([cube, goal, table, base, gripper, proprio], dim=-1)
+        noised_state = raw_state + torch.randn_like(raw_state) * noise_std
+
         optimizer.zero_grad()
-        out = model(raw_state)
+        out = model(noised_state)
         loss = F.mse_loss(out, target_action)
         loss.backward()
         optimizer.step()
@@ -1079,18 +1087,57 @@ def validate_baseline(model, loader, device):
 
 
 if BENCHMARK:
-    baseline_policy = BaselineBCPolicy().to(device)
+    baseline_policy = BaselineBCPolicy(
+        raw_dim=37,
+        hidden_dim=BC_HIDDEN_DIM,
+        action_dim=BC_ACTION_DIM,
+    ).to(device)
     baseline_optimizer = torch.optim.AdamW(baseline_policy.parameters(), lr=BC_LR)
 
-    for epoch in range(BC_EPOCHS):
+    best_baseline_val_loss = float("inf")
+    if BASELINE_CHECKPOINT_PATH.exists():
+        checkpoint = torch.load(BASELINE_CHECKPOINT_PATH)
+        baseline_policy.load_state_dict(checkpoint["model_state_dict"])
+        baseline_optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        start_epoch = checkpoint.get("epoch", -1) + 1
+        best_baseline_val_loss = checkpoint.get("val_loss", float("inf"))
+        print(
+            f"Loaded Baseline checkpoint from epoch {start_epoch} with best val loss: {best_baseline_val_loss:.5f}"
+        )
+    else:
+        start_epoch = 0
+        print("No Baseline checkpoint found. Starting training from scratch.")
+
+    for epoch in range(start_epoch, BC_EPOCHS):
         train_loss = train_baseline_epoch(
-            baseline_policy, bc_train_loader, baseline_optimizer, device
+            baseline_policy,
+            bc_train_loader,
+            baseline_optimizer,
+            device,
+            noise_std=NOISE_STD,
         )
         val_loss = validate_baseline(baseline_policy, bc_val_loader, device)
         if epoch % 1 == 0:
             print(
                 f"Baseline Epoch {epoch:03d}, Train MSE: {train_loss:.5f}, Val MSE: {val_loss:.5f}"
             )
+
+        if val_loss < best_baseline_val_loss:
+            best_baseline_val_loss = val_loss
+            checkpoint = {
+                "model_state_dict": baseline_policy.state_dict(),
+                "optimizer_state_dict": baseline_optimizer.state_dict(),
+                "epoch": epoch,
+                "train_loss": train_loss,
+                "val_loss": val_loss,
+            }
+            torch.save(checkpoint, BASELINE_CHECKPOINT_PATH)
+            print(f"\t>New best Baseline model saved with Val MSE: {val_loss:.5f}")
+
+    if BASELINE_CHECKPOINT_PATH.exists():
+        print(f"Loading best Baseline model from {BASELINE_CHECKPOINT_PATH}")
+        checkpoint = torch.load(BASELINE_CHECKPOINT_PATH)
+        baseline_policy.load_state_dict(checkpoint["model_state_dict"])
 
 
 print("\n\n--- Phase 4.2: Live Simulator Benchmarking ---")

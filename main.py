@@ -95,7 +95,7 @@ GAT_ATTENTION_HEADS = 4
 # BC Hyperparameters
 BC_EPOCHS = 50
 BC_LR = 1e-3
-BC_BATCH_SIZE = 64
+BC_BATCH_SIZE = 1024
 BC_ACTION_DIM = 4
 BC_PROPRIO_DIM = 18
 BC_GRIPPER_DIM = 7
@@ -833,7 +833,7 @@ print("\n\n--- Phase 4: Policy Training & Evaluation ---")
 #       - Trains on the whole obs group, then compares over actions via MSE
 #       - Adam with 3e-4 LR
 #       - Batch size of 1024
-#       - 1 000 000 training iterations
+#       - 1 000 000 training iterations, 1 iteration = 1 batch
 #      A second version uses a custom PlainConv visual encoder consisting of five convolutional layers (with ReLU and
 #      MaxPool) to process RGB-D images. The resulting visual features are concatenated with the robot's state and passed to the MLP
 #   2. Action Chunking with Transformers (ACT)

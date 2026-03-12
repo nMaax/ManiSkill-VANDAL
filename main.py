@@ -49,6 +49,11 @@ def seed_everything(seed: int) -> None:
 seed_everything(42)
 now = datetime.now()
 
+# CUDA avaliability
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# NOTE: Should also manage physix_cuda but there were some issues with arrays/tensors
+print(f"Working on {device}")
+
 # For proper path generation
 home = Path.home()
 cwd = Path.cwd()
@@ -73,6 +78,7 @@ BC_CHECKPOINT_PATH = script_location / "bc_policy_best.pth"
 BASELINE_CHECKPOINT_PATH = script_location / "baseline_policy_best.pth"
 
 BENCHMARK = True
+RENDER = True
 
 # Generic Hyperparameters
 SPLIT_RATIO = 0.8
@@ -97,7 +103,7 @@ BC_HIDDEN_DIM = 256
 BC_RES_HIDDEN_DIM = 256
 BC_RES_DROPOUT = 0.1
 
-# Phase 1: Scene Graph Engineering
+# %% *** Phase 1: Scene Graph Engineering ***
 
 print("\n\n--- Phase 1: Data extraction ---")
 
@@ -471,7 +477,7 @@ def build_graph(dataset, idx):
 print(build_graph(dataset, 0))
 
 
-# *** Phase 2: Representation Learning ***
+# %% *** Phase 2: Representation Learning ***
 
 print("\n\n--- Phase 2: Representation Learning ---")
 
@@ -580,11 +586,6 @@ def validate(model, loader, device):
         total_loss += loss.item() * data.num_graphs
 
     return total_loss / len(loader.dataset)
-
-
-# Training and Validation execution
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(f"Working on {device}")
 
 
 def get_all_episode_lengths(json_path):
@@ -1144,12 +1145,17 @@ print("\n\n--- Phase 4.2: Live Simulator Benchmarking ---")
 
 
 def evaluate_graph_policy(gae_model, bc_model, num_episodes=100):
+    # Reference:
+    #   https://gymnasium.farama.org/api/env/
+    #   https://gymnasium.farama.org/api/registry/#gymnasium.make
+    #   mani_skill/envs/tasks/tabletop/pick_cube.py
+
     env = gym.make(
         "PickCube-v1",
         obs_mode="state",
         control_mode="pd_ee_delta_pos",
         max_episode_steps=100,
-        render_mode="human",
+        render_mode="human" if RENDER else None,
     )
 
     gae_model.eval()
@@ -1203,7 +1209,8 @@ def evaluate_graph_policy(gae_model, bc_model, num_episodes=100):
                 action.cpu().numpy().squeeze()
             )
 
-            env.render()
+            if RENDER:
+                env.render()
 
             if info.get("success", False):
                 successes += 1
@@ -1223,7 +1230,7 @@ def evaluate_baseline_policy(baseline_model, num_episodes=100):
         obs_mode="state",
         control_mode="pd_ee_delta_pos",
         max_episode_steps=100,
-        render_mode="human",
+        render_mode="human" if RENDER else None,
     )
 
     baseline_model.eval()
@@ -1257,7 +1264,8 @@ def evaluate_baseline_policy(baseline_model, num_episodes=100):
                 action.cpu().numpy().squeeze()
             )
 
-            env.render()
+            if RENDER:
+                env.render()
 
             if info.get("success", False):
                 successes += 1

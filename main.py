@@ -360,7 +360,7 @@ print_dict_tree(dataset[0])
 #   [19:22],    3,      tcp_pose (Position): X, Y, Z
 #   [22:26],    4,      tcp_pose (Quaternion): W, X, Y, Z
 #   [26:29]     3,      goal_pose (Position only): X, Y, Z
-#   [29:42],    9,      Other Task-specific data, only included if "state" in obs_mode:
+#   [29:42],    13,      Other Task-specific data, only included if "state" in obs_mode:
 #                           "obj_pose": raw_pose,                         # Shape: (batch_size, 7) - Cube pose [x, y, z, qx, qy, qz, qw]
 #                           "tcp_to_obj_pos": tensor,                     # Shape: (batch_size, 3) - Vector from TCP to cube
 #                           "obj_to_goal_pos": tensor,                    # Shape: (batch_size, 3) - Vector from cube to goal
@@ -444,7 +444,7 @@ def build_graph(dataset, idx):
 
     # TCP is not available in the SAPIENS data, so we need to retrive it from obs
     # NOTE: Maybe this one not?
-    hand_xyz = obs.squeeze()[18:21]
+    hand_xyz = obs.squeeze()[19:22]
 
     # Bounding boxes
     # Reference:
@@ -863,7 +863,7 @@ def train_bc_epoch(model, loader, optimizer, scheduler, device, noise_std=0.01):
     for batch in loader:
         # Load data on device and reset the gradients
         z = batch["priv_states"]["embeddings"].to(device)
-        gripper = batch["obs"][:, 18:25].to(device)  # Gripper state
+        gripper = batch["obs"][:, 19:26].to(device)  # Gripper state
         proprio = batch["priv_states"]["articulations"]["panda"][:, 13:31].to(device)
         target_action = batch["action"].to(device)
         optimizer.zero_grad()
@@ -899,7 +899,7 @@ def validate_bc(model, loader, device):
     for batch in loader:
         # Load data on device
         z = batch["priv_states"]["embeddings"].to(device)
-        gripper = batch["obs"][:, 18:25].to(device)  # Gripper state
+        gripper = batch["obs"][:, 19:26].to(device)  # Gripper state
         proprio = batch["priv_states"]["articulations"]["panda"][:, 13:31].to(device)
         target_action = batch["action"].to(device)
 
@@ -1031,14 +1031,15 @@ def train_baseline_epoch(model, loader, optimizer, device, noise_std):
     model.train()
     total_loss = 0
     for batch in loader:
+        # In place of z
         cube = batch["priv_states"]["actors"]["cube"][:, :3].to(device)
         goal = batch["priv_states"]["actors"]["goal_site"][:, :3].to(device)
         table = batch["priv_states"]["actors"]["table-workspace"][:, :3].to(device)
         base = batch["priv_states"]["articulations"]["panda"][:, :3].to(device)
 
-        gripper = batch["obs"][:, 18:25].to(device)
+        # As before
+        gripper = batch["obs"][:, 19:26].to(device)
         proprio = batch["priv_states"]["articulations"]["panda"][:, 13:31].to(device)
-
         target_action = batch["action"].to(device)
 
         raw_state = torch.cat([cube, goal, table, base, gripper, proprio], dim=-1)
@@ -1063,7 +1064,7 @@ def validate_baseline(model, loader, device):
         goal = batch["priv_states"]["actors"]["goal_site"][:, :3].to(device)
         table = batch["priv_states"]["actors"]["table-workspace"][:, :3].to(device)
         base = batch["priv_states"]["articulations"]["panda"][:, :3].to(device)
-        gripper = batch["obs"][:, 18:25].to(device)
+        gripper = batch["obs"][:, 19:26].to(device)
         proprio = batch["priv_states"]["articulations"]["panda"][:, 13:31].to(device)
 
         raw_state = torch.cat([cube, goal, table, base, gripper, proprio], dim=-1)
@@ -1181,7 +1182,7 @@ def evaluate_graph_policy(gae_model, bc_model, num_episodes=100):
             with torch.no_grad():
                 z = gae_model.encode(x, edge_index, edge_attr, batch_idx)
 
-                gripper = obs[0, 18:25].detach().clone().unsqueeze(0).to(device)
+                gripper = obs[0, 19:26].detach().clone().unsqueeze(0).to(device)
                 proprio = (
                     live_states["articulations"]["panda"][0, 13:31]
                     .detach()
@@ -1236,7 +1237,7 @@ def evaluate_baseline_policy(baseline_model, num_episodes=100):
             goal = live_states["actors"]["goal_site"][0, :3]
             table = live_states["actors"]["table-workspace"][0, :3]
             base = live_states["articulations"]["panda"][0, :3]
-            gripper = obs[0, 18:25]
+            gripper = obs[0, 19:26]
             proprio = live_states["articulations"]["panda"][0, 13:31]
 
             raw_state = np.concatenate([cube, goal, table, base, gripper, proprio])

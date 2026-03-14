@@ -141,7 +141,7 @@ BC_LR = 1e-3
 BC_BATCH_SIZE = 1024
 BC_ACTION_DIM = 4
 BC_PROPRIO_DIM = 18
-BC_GRIPPER_DIM = 7
+BC_GRIPPER_DIM = 8
 BC_HIDDEN_DIM = 256
 
 # %% *** Phase 1: Scene Graph Engineering ***
@@ -1249,7 +1249,7 @@ def evaluate_graph_policy(gae_model, bc_model, num_episodes=100):
             with torch.no_grad():
                 z = gae_model.encode(x, edge_index, edge_attr, batch_idx)
 
-                gripper = obs[0, 19:26].detach().clone().unsqueeze(0).to(device)
+                gripper = obs[0, 18:26].detach().clone().unsqueeze(0).to(device)
                 proprio = (
                     live_states["articulations"]["panda"][0, 13:31]
                     .detach()
@@ -1304,7 +1304,7 @@ def evaluate_baseline_policy(baseline_model, num_episodes=100):
             goal = live_states["actors"]["goal_site"][0, :3]
             table = live_states["actors"]["table-workspace"][0, :3]
             base = live_states["articulations"]["panda"][0, :3]
-            gripper = obs[0, 19:26]
+            gripper = obs[0, 18:26]
             proprio = live_states["articulations"]["panda"][0, 13:31]
 
             raw_state = np.concatenate([cube, goal, table, base, gripper, proprio])

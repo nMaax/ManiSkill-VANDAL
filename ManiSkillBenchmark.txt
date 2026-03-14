@@ -1,0 +1,313 @@
+◄ 0s ◎ python examples/baselines/bc/bc.py \(maniskill_env) □ ManiSkill △⎪◌◦⎥ py ⌉⌊ 3.10.19 conda ◯ maniskill_env 13:14
+             --demo-path /home/massimiliano/.maniskill/demos/PickCube-v1/motionplanning/trajectory.state.pd_ee_delta_pos.physx_cpu.h5 \
+             --control-mode pd_ee_delta_pos \
+             --env-id PickCube-v1 \
+             --cuda \
+             --sim-backend gpu
+/home/massimiliano/miniconda3/envs/maniskill_env/lib/python3.10/site-packages/sapien/__init__.py:18: UserWarning: pkg_resources is deprecated as an API. See https://setuptools.pypa.io/en/latest/pkg_resources.html. The pkg_resources package is slated for removal as early as 2025-11-30. Refrain from using this package or pin to Setuptools<81.
+  import pkg_resources
+Loading 1000 episodes
+100%|███████████████████████████████████████████████████████████████████████████| 1000/1000 [00:00<00:00, 1181.02it/s]
+Iteration 0, loss: 0.26152873039245605
+Evaluated 10 episodes
+success_once: 0.0000
+return: 0.0000
+episode_len: 50.0000
+reward: 0.0000
+success_at_end: 0.0000
+Iteration 1000, loss: 0.006281236652284861
+Evaluated 10 episodes
+success_once: 0.0000
+return: 0.0000
+episode_len: 50.0000
+reward: 0.0000
+success_at_end: 0.0000
+Iteration 2000, loss: 0.002917091129347682
+Evaluated 10 episodes
+success_once: 0.0000                                                                                                  return: 0.0000                                                                                                        episode_len: 50.0000                                                                                                  reward: 0.0000
+success_at_end: 0.0000                                                                                                Iteration 3000, loss: 0.001007789745926857
+Evaluated 10 episodes
+success_once: 0.0000                                                                                                  return: 0.0000
+episode_len: 50.0000                                                                                                  reward: 0.0000                                                                                                        success_at_end: 0.0000
+Iteration 4000, loss: 0.00119270128197968                                                                             Evaluated 10 episodes                                                                                                 success_once: 0.0000
+return: 0.0000                                                                                                        episode_len: 50.0000                                                                                                  reward: 0.0000
+success_at_end: 0.0000                                                                                                Iteration 5000, loss: 0.0006658944766968489
+Evaluated 10 episodes                                                                                                 success_once: 0.0100                                                                                                  return: 0.1800
+episode_len: 50.0000
+reward: 0.0036                                                                                                        success_at_end: 0.0100
+New best success_once_rate: 0.0100. Saving checkpoint.
+New best success_at_end_rate: 0.0100. Saving checkpoint.                                                              Iteration 6000, loss: 0.0006429589120671153
+Evaluated 10 episodes
+success_once: 0.0000
+return: 0.0000
+episode_len: 50.0000
+reward: 0.0000
+success_at_end: 0.0000
+Iteration 7000, loss: 0.0002958344994112849                                                                           Evaluated 10 episodes
+success_once: 0.0000                                                                                                  return: 0.0000
+episode_len: 50.0000                                                                                                  reward: 0.0000
+success_at_end: 0.0000                                                                                                Iteration 8000, loss: 0.0010702282888814807
+Evaluated 10 episodes                                                                                                 success_once: 0.0000
+return: 0.0000                                                                                                        episode_len: 50.0000
+reward: 0.0000
+success_at_end: 0.0000
+Iteration 9000, loss: 0.0011583039304241538
+Evaluated 10 episodes                                                                                                 success_once: 0.0000
+return: 0.0000
+episode_len: 50.0000
+reward: 0.0000
+success_at_end: 0.0000
+Iteration 10000, loss: 0.0005433183396235108
+Evaluated 10 episodes                                                                                                 success_once: 0.0200                                                                                                  return: 0.3100
+episode_len: 50.0000
+reward: 0.0062
+success_at_end: 0.0100
+New best success_once_rate: 0.0200. Saving checkpoint.
+Iteration 11000, loss: 0.00017370378191117197
+Evaluated 10 episodes
+success_once: 0.0100                                                                                                  return: 0.0900
+episode_len: 50.0000
+reward: 0.0018                                                                                                        success_at_end: 0.0000
+Iteration 12000, loss: 0.00022594713664148003
+Evaluated 10 episodes                                                                                                 success_once: 0.0000
+return: 0.0000
+episode_len: 50.0000                                                                                                  reward: 0.0000
+success_at_end: 0.0000
+Iteration 13000, loss: 0.00037330598570406437
+Evaluated 10 episodes
+success_once: 0.0100
+return: 0.3600
+episode_len: 50.0000
+reward: 0.0072                                                                                                        success_at_end: 0.0100
+Iteration 14000, loss: 0.0003871183143928647
+Evaluated 10 episodes                                                                                                 success_once: 0.0000
+return: 0.0000
+episode_len: 50.0000
+reward: 0.0000
+success_at_end: 0.0000
+Iteration 15000, loss: 0.00021796408691443503
+Evaluated 10 episodes                                                                                                 success_once: 0.0000                                                                                                  return: 0.0000
+episode_len: 50.0000
+reward: 0.0000
+success_at_end: 0.0000
+Iteration 16000, loss: 0.0009283649269491434
+Evaluated 10 episodes
+success_once: 0.0100
+return: 0.3700
+episode_len: 50.0000
+reward: 0.0074                                                                                                        success_at_end: 0.0100
+Iteration 17000, loss: 0.0012957873987033963
+Evaluated 10 episodes
+success_once: 0.0000
+return: 0.0000
+episode_len: 50.0000
+reward: 0.0000                                                                                                        success_at_end: 0.0000                                                                                                Iteration 18000, loss: 0.000749882950913161
+Evaluated 10 episodes
+success_once: 0.0000
+return: 0.0000
+episode_len: 50.0000
+reward: 0.0000
+success_at_end: 0.0000
+Iteration 19000, loss: 0.0007820376777090132                                                                          Evaluated 10 episodes
+success_once: 0.0100
+return: 0.3300                                                                                                        episode_len: 50.0000
+reward: 0.0066
+success_at_end: 0.0100                                                                                                Iteration 20000, loss: 0.00010252028005197644
+Evaluated 10 episodes
+success_once: 0.0000                                                                                                  return: 0.0000
+episode_len: 50.0000
+reward: 0.0000
+success_at_end: 0.0000
+Iteration 21000, loss: 0.0003219607169739902
+Evaluated 10 episodes
+success_once: 0.0100
+return: 0.2300
+episode_len: 50.0000
+reward: 0.0046                                                                                                        success_at_end: 0.0000
+Iteration 22000, loss: 0.00012194104783702642                                                                         Evaluated 10 episodes
+success_once: 0.0000                                                                                                  return: 0.0000
+episode_len: 50.0000                                                                                                  reward: 0.0000
+success_at_end: 0.0000                                                                                                Iteration 23000, loss: 0.0002125185274053365
+Evaluated 10 episodes                                                                                                 success_once: 0.0200
+return: 0.2100                                                                                                        episode_len: 50.0000
+reward: 0.0042
+success_at_end: 0.0100
+Iteration 24000, loss: 0.0008569430792704225
+Evaluated 10 episodes
+success_once: 0.0100
+return: 0.0300                                                                                                        episode_len: 50.0000
+reward: 0.0006
+success_at_end: 0.0100
+Iteration 25000, loss: 0.0005466508446261287
+Evaluated 10 episodes
+success_once: 0.0100                                                                                                  return: 0.3600                                                                                                        episode_len: 50.0000
+reward: 0.0072
+success_at_end: 0.0100
+Iteration 26000, loss: 0.0007965185795910656
+Evaluated 10 episodes
+success_once: 0.0300
+return: 0.5300
+episode_len: 50.0000
+reward: 0.0106
+success_at_end: 0.0300
+New best success_once_rate: 0.0300. Saving checkpoint.
+New best success_at_end_rate: 0.0300. Saving checkpoint.
+Iteration 27000, loss: 8.110689668683335e-05
+Evaluated 10 episodes
+success_once: 0.0000                                                                                                  return: 0.0000
+episode_len: 50.0000
+reward: 0.0000                                                                                                        success_at_end: 0.0000
+Iteration 28000, loss: 0.0002909078320953995
+Evaluated 10 episodes                                                                                                 success_once: 0.0000
+return: 0.0000
+episode_len: 50.0000
+reward: 0.0000                                                                                                        success_at_end: 0.0000
+Iteration 29000, loss: 8.798066119197756e-05
+Evaluated 10 episodes
+success_once: 0.0000
+return: 0.0000
+episode_len: 50.0000
+reward: 0.0000                                                                                                        success_at_end: 0.0000                                                                                                Iteration 30000, loss: 8.406143024330959e-05
+Evaluated 10 episodes
+success_once: 0.0100
+return: 0.0300
+episode_len: 50.0000
+reward: 0.0006
+success_at_end: 0.0100
+Iteration 31000, loss: 9.302789112553e-05                                                                             Evaluated 10 episodes
+success_once: 0.0100
+return: 0.4500                                                                                                        episode_len: 50.0000
+reward: 0.0090
+success_at_end: 0.0100
+Iteration 32000, loss: 0.00021756664500571787
+Evaluated 10 episodes                                                                                                 success_once: 0.0000
+return: 0.0000
+episode_len: 50.0000
+reward: 0.0000
+success_at_end: 0.0000
+Iteration 33000, loss: 0.0003116173029411584
+Evaluated 10 episodes
+success_once: 0.0000
+return: 0.0000
+episode_len: 50.0000
+reward: 0.0000
+success_at_end: 0.0000
+Iteration 34000, loss: 0.00013372248213272542
+Evaluated 10 episodes
+success_once: 0.0000
+return: 0.0000
+episode_len: 50.0000
+reward: 0.0000
+success_at_end: 0.0000
+Iteration 35000, loss: 0.00017031640163622797
+Evaluated 10 episodes
+success_once: 0.0100
+return: 0.0700
+episode_len: 50.0000
+reward: 0.0014
+success_at_end: 0.0100
+Iteration 36000, loss: 7.333025132538751e-05
+Evaluated 10 episodes
+success_once: 0.0000
+return: 0.0000
+episode_len: 50.0000
+reward: 0.0000
+success_at_end: 0.0000
+Iteration 37000, loss: 0.00013722770381718874
+Evaluated 10 episodes
+success_once: 0.0000
+return: 0.0000
+episode_len: 50.0000
+reward: 0.0000
+success_at_end: 0.0000
+Iteration 38000, loss: 7.117594941519201e-05
+Evaluated 10 episodes
+success_once: 0.0000
+return: 0.0000
+episode_len: 50.0000
+reward: 0.0000
+success_at_end: 0.0000
+Iteration 39000, loss: 3.439185820752755e-05
+Evaluated 10 episodes
+success_once: 0.0000
+return: 0.0000
+episode_len: 50.0000
+reward: 0.0000
+success_at_end: 0.0000
+Iteration 40000, loss: 9.875763498712331e-05
+Evaluated 10 episodes
+success_once: 0.0000
+return: 0.0000
+episode_len: 50.0000
+reward: 0.0000
+success_at_end: 0.0000
+Iteration 41000, loss: 8.759112097322941e-05
+Evaluated 10 episodes
+success_once: 0.0200
+return: 0.2900
+episode_len: 50.0000
+reward: 0.0058
+success_at_end: 0.0100
+Iteration 42000, loss: 8.5823965491727e-05
+Evaluated 10 episodes
+success_once: 0.0000
+return: 0.0000
+episode_len: 50.0000
+reward: 0.0000
+success_at_end: 0.0000
+Iteration 43000, loss: 5.667937148245983e-05
+Evaluated 10 episodes
+success_once: 0.0200
+return: 0.7800
+episode_len: 50.0000
+reward: 0.0156
+success_at_end: 0.0100
+Iteration 44000, loss: 3.1877625588094816e-05
+Evaluated 10 episodes
+success_once: 0.0200
+return: 0.0700
+episode_len: 50.0000
+reward: 0.0014
+success_at_end: 0.0100
+Iteration 45000, loss: 3.4818556741811335e-05
+Evaluated 10 episodes
+success_once: 0.0100
+return: 0.3000
+episode_len: 50.0000
+reward: 0.0060
+success_at_end: 0.0100
+Iteration 46000, loss: 6.764632416889071e-05
+Evaluated 10 episodes
+success_once: 0.0000
+return: 0.0000
+episode_len: 50.0000
+reward: 0.0000
+success_at_end: 0.0000
+Iteration 47000, loss: 7.70833867136389e-05
+Evaluated 10 episodes
+success_once: 0.0100
+return: 0.0400
+episode_len: 50.0000
+reward: 0.0008
+success_at_end: 0.0100
+Iteration 48000, loss: 3.269351145718247e-05
+Evaluated 10 episodes
+success_once: 0.0100
+return: 0.0600
+episode_len: 50.0000
+reward: 0.0012
+success_at_end: 0.0000
+Iteration 49000, loss: 3.893085886375047e-05
+Evaluated 10 episodes
+success_once: 0.0000
+return: 0.0000
+episode_len: 50.0000
+reward: 0.0000
+success_at_end: 0.0000
+Iteration 50000, loss: 0.00014574351371265948
+Evaluated 10 episodes
+success_once: 0.0100
+return: 0.0200
+episode_len: 50.0000
+reward: 0.0004
+success_at_end: 0.0100

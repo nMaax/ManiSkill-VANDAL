@@ -49,3 +49,4 @@ htmlcov/
 *.pth
 *.pth.bak
 *.bak
+runs/

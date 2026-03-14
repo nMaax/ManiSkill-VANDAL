@@ -467,8 +467,8 @@ def build_graph(dataset, idx):
 
     # Concatenate XYZ with Identities -> Shape: [5 nodes, 8 features]
     # NOTE: Most of these nodes are actually static, this may lead to a really good model later since it understands
-    # that it can achive low MSE by simply memorizing the tabl, base and goal positions.
-    # A solution could be to enforce some arbitrary topology (see NOTE below), or tweak the latent dimension above?
+    # that it can achive low MSE by simply memorizing the table, base and goal positions.
+    # Maybe I should just ignore these? ask Davide
     nodes_list = [
         np.concatenate([cube_xyz, cube_box, identities[0]]),
         np.concatenate([goal_xyz, goal_box, identities[1]]),
@@ -520,12 +520,11 @@ print("\n\n--- Phase 2: Representation Learning ---")
 # NOTE: I could also implment a second head for reconstructing edge_index or adjacency matrix?
 class GATAutoencoder(nn.Module):
     def __init__(
-        self, in_channels, hidden_channels, latent_channels, heads, feature_size=3
+        self, in_channels, hidden_channels, latent_channels, heads, feature_size
     ):
         super().__init__()
-        self.feature_size = (
-            feature_size  # Number of features per node, identity excluded (e.g., XYZ)
-        )
+        # Number of features per node, identity excluded
+        self.feature_size = feature_size
 
         # ENCODER: graph -> hidden -> latent
         self.encoder_conv1 = GATConv(
@@ -539,9 +538,7 @@ class GATAutoencoder(nn.Module):
         self.decoder = nn.Sequential(
             nn.Linear(latent_channels + 5, hidden_channels),  # 5 is the number of nodes
             nn.ReLU(),
-            nn.Linear(
-                hidden_channels, feature_size
-            ),  # We only want to predict the 3 XYZ coords
+            nn.Linear(hidden_channels, feature_size),
         )
 
     def encode(self, x, edge_index, edge_attr, batch):
@@ -872,12 +869,16 @@ def train_bc_epoch(model, loader, optimizer, scheduler, device, noise_std=0.01):
         optimizer.zero_grad()
 
         # Data augmentation
-        z_noise = z + torch.randn_like(z) * noise_std
-        gripper_noise = gripper + torch.randn_like(gripper) * (noise_std * 0.5)
-        proprio_noise = proprio + torch.randn_like(proprio) * noise_std
+        # NOTE: Maybe this could lead to errors since TCP should be the consequence of the rest of the environment,
+        # so adding noise to it may break the physical consistency of the data;
+        # however, I think that if the noise is small enough, it should be fine and actually help the model to generalize better
+        # anyway, ManiSkill benchmark doesnt do it
+        z = z + torch.randn_like(z) * noise_std
+        gripper = gripper + torch.randn_like(gripper) * (noise_std * 0.5)
+        proprio = proprio + torch.randn_like(proprio) * noise_std
 
         # Forward pass
-        out = model(z_noise, gripper_noise, proprio_noise)
+        out = model(z, gripper, proprio)
 
         # Loss
         loss = F.mse_loss(out, target_action)

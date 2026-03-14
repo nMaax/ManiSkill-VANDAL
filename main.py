@@ -1101,7 +1101,7 @@ print("\n\n--- Phase 4.1: Baseline Benchmarking ---")
 
 
 class BaselineBCPolicy(nn.Module):
-    def __init__(self, raw_dim=37, action_dim=4, hidden_dim=64):
+    def __init__(self, raw_dim=38, action_dim=4, hidden_dim=64):
         super().__init__()
         self.mlp = nn.Sequential(
             nn.Linear(raw_dim, hidden_dim),

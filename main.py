@@ -870,7 +870,7 @@ class MLPGraphStateBCPolicy(nn.Module):
         return self.mlp(x)
 
 
-def train_bc_epoch(model, loader, optimizer, scheduler, device, noise_std=0.01):
+def train_bc_epoch(model, loader, optimizer, scheduler, device, noise_std=None):
     model.train()
     total_loss = 0
     for batch in loader:
@@ -887,10 +887,10 @@ def train_bc_epoch(model, loader, optimizer, scheduler, device, noise_std=0.01):
         # so adding noise to it may break the physical consistency of the data;
         # however, I think that if the noise is small enough, it should be fine and actually help the model to generalize better
         # anyway, ManiSkill benchmark doesnt do it
-        #
-        # z = z + torch.randn_like(z) * noise_std
-        # gripper = gripper + torch.randn_like(gripper) * (noise_std * 0.5)
-        # proprio = proprio + torch.randn_like(proprio) * noise_std
+        if noise_std is not None:
+            z = z + torch.randn_like(z) * noise_std
+            gripper = gripper + torch.randn_like(gripper) * (noise_std * 0.5)
+            proprio = proprio + torch.randn_like(proprio) * noise_std
 
         # Forward pass
         out = model(z, gripper, proprio)
@@ -994,7 +994,11 @@ else:
 # Train the model for the missing epochs
 for epoch in range(start_epoch, BC_EPOCHS):
     train_loss = train_bc_epoch(
-        policy, bc_train_loader, bc_optimizer, bc_scheduler, device, noise_std=NOISE_STD
+        policy,
+        bc_train_loader,
+        bc_optimizer,
+        bc_scheduler,
+        device,
     )
     val_loss = validate_bc(policy, bc_val_loader, device)
     print(
@@ -1046,7 +1050,7 @@ class BaselineBCPolicy(nn.Module):
         return self.mlp(raw_state)
 
 
-def train_baseline_epoch(model, loader, optimizer, device, noise_std):
+def train_baseline_epoch(model, loader, optimizer, device, noise_std=None):
     model.train()
     total_loss = 0
     for batch in loader:
@@ -1061,19 +1065,18 @@ def train_baseline_epoch(model, loader, optimizer, device, noise_std):
         proprio = batch["priv_states"]["articulations"]["panda"][:, 13:31].to(device)
         target_action = batch["action"].to(device)
 
-        raw_state = torch.cat([cube, goal, table, base, gripper, proprio], dim=-1)
+        state = torch.cat([cube, goal, table, base, gripper, proprio], dim=-1)
 
-        # NOTE: same as above
-        #
-        # noised_state = raw_state + torch.randn_like(raw_state) * noise_std
+        if noise_std is not None:
+            state = state + torch.randn_like(state) * noise_std
 
         optimizer.zero_grad()
-        out = model(raw_state)
+        out = model(state)
         loss = F.mse_loss(out, target_action)
         loss.backward()
         optimizer.step()
 
-        total_loss += loss.item() * raw_state.size(0)
+        total_loss += loss.item() * state.size(0)
     return total_loss / len(loader.dataset)
 
 
@@ -1126,7 +1129,6 @@ if BENCHMARK:
             bc_train_loader,
             baseline_optimizer,
             device,
-            noise_std=NOISE_STD,
         )
         val_loss = validate_baseline(baseline_policy, bc_val_loader, device)
         if epoch % 1 == 0:

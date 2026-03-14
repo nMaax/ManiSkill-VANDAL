@@ -469,6 +469,7 @@ def build_graph(dataset, idx):
     # NOTE: Most of these nodes are actually static, this may lead to a really good model later since it understands
     # that it can achive low MSE by simply memorizing the table, base and goal positions.
     # Maybe I should just ignore these? ask Davide
+    # IDEA: I could first train the whole model and then fine tune it on the non-static nodes specifically
     nodes_list = [
         np.concatenate([cube_xyz, cube_box, identities[0]]),
         np.concatenate([goal_xyz, goal_box, identities[1]]),
@@ -520,11 +521,19 @@ print("\n\n--- Phase 2: Representation Learning ---")
 # NOTE: I could also implment a second head for reconstructing edge_index or adjacency matrix?
 class GATAutoencoder(nn.Module):
     def __init__(
-        self, in_channels, hidden_channels, latent_channels, heads, feature_size
+        self,
+        in_channels,
+        hidden_channels,
+        latent_channels,
+        heads,
+        feature_size,
+        number_of_nodes=5,
     ):
         super().__init__()
         # Number of features per node, identity excluded
         self.feature_size = feature_size
+        # Number of nodes in the graph, i.e. size of the identity
+        self.number_of_nodes = number_of_nodes
 
         # ENCODER: graph -> hidden -> latent
         self.encoder_conv1 = GATConv(
@@ -536,7 +545,7 @@ class GATAutoencoder(nn.Module):
 
         # DECODER: latent vector + node identity -> reconstructs XYZ
         self.decoder = nn.Sequential(
-            nn.Linear(latent_channels + 5, hidden_channels),  # 5 is the number of nodes
+            nn.Linear(latent_channels + number_of_nodes, hidden_channels),
             nn.ReLU(),
             nn.Linear(hidden_channels, feature_size),
         )
@@ -547,6 +556,7 @@ class GATAutoencoder(nn.Module):
         node_z = self.encoder_conv2(x, edge_index, edge_attr)
 
         # Pool all nodes in the graph into z
+        # NOTE: what if I just concat this?
         global_z = global_mean_pool(node_z, batch)
         return global_z
 
@@ -655,7 +665,9 @@ train_loader = GeoDataLoader(train_dataset, batch_size=GAT_BATCH_SIZE, shuffle=T
 val_loader = GeoDataLoader(val_dataset, batch_size=GAT_BATCH_SIZE)
 
 # Get input feature dimension from the first graph (should be 6 in our case: XYZ + One-Hot Identity)
+num_nodes = data_list[0].x.shape[0]
 in_channels = data_list[0].x.shape[1]
+feature_size = in_channels - num_nodes
 
 # Prepare the GNN, optmizer etc.
 model = GATAutoencoder(
@@ -663,7 +675,8 @@ model = GATAutoencoder(
     hidden_channels=GAT_HIDDEN_CHANNELS,
     latent_channels=GAT_LATENT_CHANNELS,
     heads=GAT_ATTENTION_HEADS,
-    feature_size=6,
+    feature_size=feature_size,
+    number_of_nodes=num_nodes,
 ).to(device)
 optimizer = torch.optim.AdamW(model.parameters(), lr=GAT_LR)
 

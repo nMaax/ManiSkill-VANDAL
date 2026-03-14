@@ -469,8 +469,9 @@ def build_graph(dataset, idx):
 
     # Concatenate XYZ with Identities -> Shape: [5 nodes, 8 features]
     # NOTE: Most of these nodes are actually static, this may lead to a really good model later since it understands
-    # that it can achive low MSE by simply memorizing the tabl, base and goal positions.
-    # A solution could be to enforce some arbitrary topology (see NOTE below), or tweak the latent dimension above?
+    # that it can achive low MSE by simply memorizing the table, base and goal positions.
+    # Maybe I should just ignore these? ask Davide
+    # IDEA: I could first train the whole model and then fine tune it on the non-static nodes specifically
     nodes_list = [
         np.concatenate([cube_xyz, cube_box, identities[0]]),
         np.concatenate([goal_xyz, goal_box, identities[1]]),
@@ -522,12 +523,19 @@ print("\n\n--- Phase 2: Representation Learning ---")
 # NOTE: I could also implment a second head for reconstructing edge_index or adjacency matrix?
 class GATAutoencoder(nn.Module):
     def __init__(
-        self, in_channels, hidden_channels, latent_channels, heads, feature_size=3
+        self,
+        number_of_nodes,
+        in_channels,
+        feature_size,
+        hidden_channels,
+        latent_channels,
+        heads,
     ):
         super().__init__()
-        self.feature_size = (
-            feature_size  # Number of features per node, identity excluded (e.g., XYZ)
-        )
+        # Number of features per node, identity excluded
+        self.feature_size = feature_size
+        # Number of nodes in the graph, i.e. size of the identity
+        self.number_of_nodes = number_of_nodes
 
         # ENCODER: graph -> hidden -> latent
         self.encoder_conv1 = GATConv(
@@ -539,11 +547,9 @@ class GATAutoencoder(nn.Module):
 
         # DECODER: latent vector + node identity -> reconstructs XYZ
         self.decoder = nn.Sequential(
-            nn.Linear(latent_channels + 5, hidden_channels),  # 5 is the number of nodes
+            nn.Linear(latent_channels + number_of_nodes, hidden_channels),
             nn.ReLU(),
-            nn.Linear(
-                hidden_channels, feature_size
-            ),  # We only want to predict the 3 XYZ coords
+            nn.Linear(hidden_channels, feature_size),
         )
 
     def encode(self, x, edge_index, edge_attr, batch):
@@ -552,6 +558,7 @@ class GATAutoencoder(nn.Module):
         node_z = self.encoder_conv2(x, edge_index, edge_attr)
 
         # Pool all nodes in the graph into z
+        # NOTE: what if I just concat this?
         global_z = global_mean_pool(node_z, batch)
         return global_z
 
@@ -660,15 +667,18 @@ train_loader = GeoDataLoader(train_dataset, batch_size=GAT_BATCH_SIZE, shuffle=T
 val_loader = GeoDataLoader(val_dataset, batch_size=GAT_BATCH_SIZE)
 
 # Get input feature dimension from the first graph (should be 6 in our case: XYZ + One-Hot Identity)
+num_nodes = data_list[0].x.shape[0]
 in_channels = data_list[0].x.shape[1]
+feature_size = in_channels - num_nodes
 
 # Prepare the GNN, optmizer etc.
 model = GATAutoencoder(
+    number_of_nodes=num_nodes,
     in_channels=in_channels,
+    feature_size=feature_size,
     hidden_channels=GAT_HIDDEN_CHANNELS,
     latent_channels=GAT_LATENT_CHANNELS,
     heads=GAT_ATTENTION_HEADS,
-    feature_size=6,
 ).to(device)
 optimizer = torch.optim.AdamW(model.parameters(), lr=GAT_LR)
 
@@ -888,18 +898,24 @@ def train_bc_epoch(model, loader, optimizer, scheduler, device, noise_std=0.01):
     for batch in loader:
         # Load data on device and reset the gradients
         z = batch["priv_states"]["embeddings"].to(device)
-        gripper = batch["obs"][:, 19:26].to(device)  # Gripper state
+        gripper = batch["obs"][:, 18:26].to(device)  # is_grasped + tcp_pose
         proprio = batch["priv_states"]["articulations"]["panda"][:, 13:31].to(device)
         target_action = batch["action"].to(device)
         optimizer.zero_grad()
 
         # Data augmentation
-        z_noise = z + torch.randn_like(z) * noise_std
-        gripper_noise = gripper + torch.randn_like(gripper) * (noise_std * 0.5)
-        proprio_noise = proprio + torch.randn_like(proprio) * noise_std
+        #
+        # NOTE: Maybe this could lead to errors since TCP should be the consequence of the rest of the environment,
+        # so adding noise to it may break the physical consistency of the data;
+        # however, I think that if the noise is small enough, it should be fine and actually help the model to generalize better
+        # anyway, ManiSkill benchmark doesnt do it
+        #
+        # z = z + torch.randn_like(z) * noise_std
+        # gripper = gripper + torch.randn_like(gripper) * (noise_std * 0.5)
+        # proprio = proprio + torch.randn_like(proprio) * noise_std
 
         # Forward pass
-        out = model(z_noise, gripper_noise, proprio_noise)
+        out = model(z, gripper, proprio)
 
         # Loss
         loss = F.mse_loss(out, target_action)
@@ -924,7 +940,7 @@ def validate_bc(model, loader, device):
     for batch in loader:
         # Load data on device
         z = batch["priv_states"]["embeddings"].to(device)
-        gripper = batch["obs"][:, 19:26].to(device)  # Gripper state
+        gripper = batch["obs"][:, 18:26].to(device)  # Gripper state
         proprio = batch["priv_states"]["articulations"]["panda"][:, 13:31].to(device)
         target_action = batch["action"].to(device)
 
@@ -1063,15 +1079,18 @@ def train_baseline_epoch(model, loader, optimizer, device, noise_std):
         base = batch["priv_states"]["articulations"]["panda"][:, :3].to(device)
 
         # As before
-        gripper = batch["obs"][:, 19:26].to(device)
+        gripper = batch["obs"][:, 18:26].to(device)
         proprio = batch["priv_states"]["articulations"]["panda"][:, 13:31].to(device)
         target_action = batch["action"].to(device)
 
         raw_state = torch.cat([cube, goal, table, base, gripper, proprio], dim=-1)
-        noised_state = raw_state + torch.randn_like(raw_state) * noise_std
+
+        # NOTE: same as above
+        #
+        # noised_state = raw_state + torch.randn_like(raw_state) * noise_std
 
         optimizer.zero_grad()
-        out = model(noised_state)
+        out = model(raw_state)
         loss = F.mse_loss(out, target_action)
         loss.backward()
         optimizer.step()
@@ -1089,7 +1108,7 @@ def validate_baseline(model, loader, device):
         goal = batch["priv_states"]["actors"]["goal_site"][:, :3].to(device)
         table = batch["priv_states"]["actors"]["table-workspace"][:, :3].to(device)
         base = batch["priv_states"]["articulations"]["panda"][:, :3].to(device)
-        gripper = batch["obs"][:, 19:26].to(device)
+        gripper = batch["obs"][:, 18:26].to(device)
         proprio = batch["priv_states"]["articulations"]["panda"][:, 13:31].to(device)
 
         raw_state = torch.cat([cube, goal, table, base, gripper, proprio], dim=-1)

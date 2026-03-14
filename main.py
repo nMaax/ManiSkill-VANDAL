@@ -120,6 +120,7 @@ GAT_CHECKPOINT_PATH = script_location / args.gat_checkpoint
 BC_CHECKPOINT_PATH = script_location / args.bc_checkpoint
 BASELINE_CHECKPOINT_PATH = script_location / args.baseline_checkpoint
 
+# Flags for run later
 BENCHMARK = args.benchmark
 RENDER = args.render
 
@@ -346,6 +347,8 @@ def print_dict_tree(data, indent=""):
 
 print_dict_tree(dataset[0])
 
+# *** NOTES ON HOW TO ACCESS DATA ***
+#
 # ** Privilege states **
 #
 # Note that `env_states` is simply a direct memory dump from the underlying SAPIENS engine
@@ -385,7 +388,7 @@ print_dict_tree(dataset[0])
 #   References:
 #       https://maniskill.readthedocs.io/en/latest/_modules/mani_skill/utils/structs/actor.html
 #       https://maniskill.readthedocs.io/en/latest/_modules/mani_skill/utils/structs/articulation.html
-
+#
 # ** Observations **
 #
 # Note that SAPIENS tracks the world using the absolute minimum variables required to calculate collisions and gravity
@@ -448,6 +451,7 @@ print_dict_tree(dataset[0])
 #       https://maniskill.readthedocs.io/en/latest/_modules/mani_skill/envs/tasks/tabletop/pick_cube.html#PickCubeEnv._get_obs_extra
 #       See mani_skill/envs/tasks/tabletop/pick_cube.py#L132-L145 for what values are returned as extras in obs
 #
+# ** Comments **
 #
 # Table is always the same thorugh all episodes, and for all frames of the episode
 # Goal instead may change between episodes, but within the same is constant
@@ -561,7 +565,6 @@ print(build_graph(dataset, 0))
 print("\n\n--- Phase 2: Representation Learning ---")
 
 
-# NOTE: I could also implment a second head for reconstructing edge_index or adjacency matrix?
 class GATAutoencoder(nn.Module):
     def __init__(
         self,
@@ -586,6 +589,7 @@ class GATAutoencoder(nn.Module):
             hidden_channels * heads, latent_channels, heads=1, concat=False, edge_dim=1
         )  # Since heads=1, concat=False is not really needed, but I put it for clarity
 
+        # NOTE: I could also implment a second head for reconstructing the weighted adjacency matrix?
         # DECODER: latent vector + node identity -> reconstructs XYZ
         self.decoder = nn.Sequential(
             nn.Linear(latent_channels + number_of_nodes, hidden_channels),
@@ -599,7 +603,7 @@ class GATAutoencoder(nn.Module):
         node_z = self.encoder_conv2(x, edge_index, edge_attr)
 
         # Pool all nodes in the graph into z
-        # NOTE: what if I just concat this?
+        # NOTE: what if I just concat this? The number of nodes is fixed
         global_z = global_mean_pool(node_z, batch)
         return global_z
 
@@ -618,13 +622,6 @@ class GATAutoencoder(nn.Module):
         reconstructed_xyz = self.decoder(dec_input)
 
         return reconstructed_xyz, global_z
-
-
-# Consider that proprioception will be already present in the input data to the IL model later,
-# maybe it is redundant to pass it here?
-#
-# My answer: I dont think so, as features in the latent representation are not the same of the raw ones,
-# they bring some extra information by interacting with other nodes in the graph!
 
 
 def train_epoch(model, loader, optimizer, device):
@@ -843,7 +840,7 @@ print_dict_tree(embeddings_dataset[0])
 
 
 def compute_trajectory_embeddings_similarity(trajectory_embeddings):
-    # trajectory_embeddings shape: [T, 16]
+    # trajectory_embeddings shape: [T, GAT_LATENT_CHANNELS]
     z_t = trajectory_embeddings[:-1]
     z_next = trajectory_embeddings[1:]
 
@@ -863,7 +860,7 @@ def check_temporal_consistency(start_frame_idx, episode_length):
     print(f"Mean Temporal Similarity: {sim_scores.mean().item():.4f}")
 
 
-# Check temporal consistency for the first 5 episodes (cosine similarity over subsequent frames' embeddings)
+# Check temporal consistency for the first 5 episodes
 start_idx = 0
 for i in range(5):
     print(f"\nEpisode {i}")
@@ -876,10 +873,9 @@ print()
 
 print("\n\n--- Phase 4: Policy Training & Evaluation ---")
 
-# In ManiSkill examples, the PickCube-v1 task is addressed using three primary architectures:
+# In ManiSkill examples/, the PickCube-v1 task is addressed using three primary architectures:
 #
-#   1. Behavioral Cloning (BC)
-#      A MLP with two hidden layers of 256 units and ReLU activations
+#   1. Behavioral Cloning (BC): A MLP with two hidden layers of 256 units and ReLU activations
 #       - Trained on the whole dataset (no validation/test set)
 #       - Trains on the whole obs group, then compares over actions via MSE
 #       - Adam with 3e-4 LR
@@ -890,8 +886,10 @@ print("\n\n--- Phase 4: Policy Training & Evaluation ---")
 #   2. Action Chunking with Transformers (ACT)
 #   3. Diffusion Policy
 #
-#   See examples/baselines/bc, examples/baselines/act, and examples/baselines/diffusion_policy respectively,
-#   with specific scripts like bc.py, train.py, and train_rgbd.py providing the configurations for the PickCube-v1 task
+#   Reference
+#       examples/baselines/bc,
+#       examples/baselines/act,
+#       examples/baselines/diffusion_policy
 
 
 class MLPGraphStateBCPolicy(nn.Module):
@@ -918,6 +916,8 @@ def train_bc_epoch(model, loader, optimizer, scheduler, device, noise_std=None):
     total_loss = 0
     for batch in loader:
         # Load data on device and reset the gradients
+        # NOTE: z was also computed based on some of the above raw tensors,
+        # this is not redundant anyway since the GAT can learn to combine these features in a non-linear way
         z = batch["priv_states"]["embeddings"].to(device)
         gripper = batch["obs"][:, 18:26].to(device)  # is_grasped + tcp_pose
         proprio = batch["priv_states"]["articulations"]["panda"][:, 13:31].to(device)
@@ -929,7 +929,7 @@ def train_bc_epoch(model, loader, optimizer, scheduler, device, noise_std=None):
         # NOTE: Maybe this could lead to errors since TCP should be the consequence of the rest of the environment,
         # so adding noise to it may break the physical consistency of the data;
         # however, I think that if the noise is small enough, it should be fine and actually help the model to generalize better
-        # anyway, ManiSkill benchmark doesnt do it
+        # anyway, ManiSkill benchmark doesnt do it, so lets just avoid it
         if noise_std is not None:
             z = z + torch.randn_like(z) * noise_std
             gripper = gripper + torch.randn_like(gripper) * (noise_std * 0.5)
@@ -1004,8 +1004,7 @@ bc_train_loader = TorchDataLoader(
 )
 bc_val_loader = TorchDataLoader(bc_val_dataset, batch_size=BC_BATCH_SIZE)
 
-# Prepare the model, optmizer etc.
-
+# Prepare the model, optmizer, eventually scheduler etc.
 policy = MLPGraphStateBCPolicy(
     z_dim=GAT_LATENT_CHANNELS,
     proprio_dim=BC_PROPRIO_DIM,
@@ -1013,10 +1012,8 @@ policy = MLPGraphStateBCPolicy(
     action_dim=BC_ACTION_DIM,
     hidden_dim=BC_HIDDEN_DIM,
 ).to(device)
-
-
 bc_optimizer = torch.optim.AdamW(policy.parameters(), lr=BC_LR)
-bc_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(bc_optimizer, T_max=BC_EPOCHS)
+bc_scheduler = None
 
 # Check for existence of a checkpoint and eventually load it
 best_bc_val_loss = float("inf")

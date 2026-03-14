@@ -509,20 +509,17 @@ def build_graph(dataset, idx):
     base_box = np.array([0.20, 0.20, 0.20])  # educated guess(?)
     hand_box = np.array([0.10, 0.05, 0.10])  # educated guess(?)
 
-    # Build One-Hot Identities
-    identities = np.eye(5)
-
     # Concatenate XYZ with Identities -> Shape: [5 nodes, 8 features]
     # NOTE: Most of these nodes are actually static, this may lead to a really good model later since it understands
     # that it can achive low MSE by simply memorizing the table, base and goal positions.
     # Maybe I should just ignore these? ask Davide
     # IDEA: I could first train the whole model and then fine tune it on the non-static nodes specifically
     nodes_list = [
-        np.concatenate([cube_xyz, cube_box, identities[0]]),
-        np.concatenate([goal_xyz, goal_box, identities[1]]),
-        np.concatenate([table_xyz, table_box, identities[2]]),
-        np.concatenate([base_xyz, base_box, identities[3]]),
-        np.concatenate([hand_xyz, hand_box, identities[4]]),
+        np.concatenate([cube_xyz, cube_box]),
+        np.concatenate([goal_xyz, goal_box]),
+        np.concatenate([table_xyz, table_box]),
+        np.concatenate([base_xyz, base_box]),
+        np.concatenate([hand_xyz, hand_box]),
     ]
     x = torch.tensor(np.array(nodes_list), dtype=torch.float)
 
@@ -570,16 +567,16 @@ class GATAutoencoder(nn.Module):
         self,
         number_of_nodes,
         in_channels,
-        feature_size,
         hidden_channels,
         latent_channels,
         heads,
     ):
         super().__init__()
-        # Number of features per node, identity excluded
-        self.feature_size = feature_size
-        # Number of nodes in the graph, i.e. size of the identity
         self.number_of_nodes = number_of_nodes
+        self.in_channels = in_channels
+        self.hidden_channels = hidden_channels
+        self.latent_channels = latent_channels
+        self.heads = heads
 
         # ENCODER: graph -> hidden -> latent
         self.encoder_conv1 = GATConv(
@@ -587,63 +584,90 @@ class GATAutoencoder(nn.Module):
         )
         self.encoder_conv2 = GATConv(
             hidden_channels * heads, latent_channels, heads=1, concat=False, edge_dim=1
-        )  # Since heads=1, concat=False is not really needed, but I put it for clarity
-
-        # NOTE: I could also implment a second head for reconstructing the weighted adjacency matrix?
-        # DECODER: latent vector + node identity -> reconstructs XYZ
-        self.decoder = nn.Sequential(
-            nn.Linear(latent_channels + number_of_nodes, hidden_channels),
-            nn.ReLU(),
-            nn.Linear(hidden_channels, feature_size),
         )
 
-    def encode(self, x, edge_index, edge_attr, batch):
-        x = self.encoder_conv1(x, edge_index, edge_attr)
-        x = F.elu(x)
-        node_z = self.encoder_conv2(x, edge_index, edge_attr)
+        # FEATURES DECODER: latent vector -> reconstructs features
+        self.features_decoder = nn.Sequential(
+            nn.Linear(latent_channels, hidden_channels),
+            nn.ReLU(),
+            nn.Linear(hidden_channels, in_channels),
+        )
 
-        # Pool all nodes in the graph into z
-        # NOTE: what if I just concat this? The number of nodes is fixed
-        global_z = global_mean_pool(node_z, batch)
-        return global_z
+        # TOPOLOGY DECODER: pair of latent vectors -> reconstructs weights
+        self.topology_decoder = nn.Sequential(
+            nn.Linear(
+                latent_channels * 2, hidden_channels
+            ),  # Takes 2 concatenated nodes
+            nn.ReLU(),
+            nn.Linear(hidden_channels, 1),  # Outputs a single scalar distance
+        )
+
+    def encode(self, data):
+        x = self.encoder_conv1(data.x, data.edge_index, data.edge_attr)
+        x = F.elu(x)
+        node_z = self.encoder_conv2(x, data.edge_index, data.edge_attr)
+
+        return node_z
 
     def forward(self, data):
-        # Encode to a single scene vector [BatchSize, latent_channels]
-        global_z = self.encode(data.x, data.edge_index, data.edge_attr, data.batch)
+        # ENCODE
+        node_z = self.encode(data)
 
-        # To decode, we expand the global vector back to all nodes
-        z_expanded = global_z[data.batch]
+        # DECODE FEATURES
+        reconstructed_feat = self.features_decoder(node_z)
 
-        # Give the decoder the encoded latent vector (z) and the node identities (values of x after the first 3 columns XYZ)
-        identities = data.x[:, self.feature_size :]
-        dec_input = torch.cat([z_expanded, identities], dim=-1)
+        # DECODE TOPOLOGY
+        row, col = data.edge_index
+        # Concatenate source and destination embeddings
+        z_pairs = torch.cat([node_z[row], node_z[col]], dim=-1)
+        topology_pred = self.topology_decoder(z_pairs)
 
-        # Predict XYZ
-        reconstructed_xyz = self.decoder(dec_input)
+        # FLATTEN GLOBAL Z FOR THE BC POLICY
+        # Reshapes from [320, 8] -> [64, 40]
+        global_z = node_z.view(data.num_graphs, self.number_of_nodes * node_z.size(-1))
 
-        return reconstructed_xyz, global_z
+        return reconstructed_feat, topology_pred, global_z
 
 
 def train_epoch(model, loader, optimizer, device):
     model.train()
     total_loss = 0
     for data in loader:
-        # Load data on device and reset the gradients
         data = data.to(device)
         optimizer.zero_grad()
 
         # Forward pass
-        out, _ = model(data)
+        out_feat, out_topo, _ = model(data)
 
-        # Loss (Target is only the first 3 columns (XYZ) since the remaning are the identities)
-        target_xyz = data.x[:, : model.feature_size]
-        loss = F.mse_loss(out, target_xyz)
+        # Target tensors
+        target_feat = data.x
+        target_topo = data.edge_attr
 
-        # Backward pass
+        # Reshape from [320, F] -> [64, 5, F]
+        out_feat_reshaped = out_feat.view(data.num_graphs, model.number_of_nodes, -1)
+        target_feat_reshaped = target_feat.view(
+            data.num_graphs, model.number_of_nodes, -1
+        )
+
+        # Compute MSE for features
+        # 0: Cube, 4: Hand vs. 1: Goal, 2: Table, 3: Base
+        loss_dynamic = F.mse_loss(
+            out_feat_reshaped[:, [0, 4], :], target_feat_reshaped[:, [0, 4], :]
+        )
+        loss_static = F.mse_loss(
+            out_feat_reshaped[:, [1, 2, 3], :], target_feat_reshaped[:, [1, 2, 3], :]
+        )
+        loss_features = (10.0 * loss_dynamic) + loss_static
+
+        # Compute topology MSE (weights)
+        loss_topology = F.mse_loss(out_topo, target_topo)
+
+        # Combine
+        loss = loss_features + loss_topology
+
         loss.backward()
         optimizer.step()
 
-        # To have a proper loss printing, we weight this for the size of the batch
         total_loss += loss.item() * data.num_graphs
 
     return total_loss / len(loader.dataset)
@@ -654,17 +678,37 @@ def validate(model, loader, device):
     model.eval()
     total_loss = 0
     for data in loader:
-        # Load data on device
         data = data.to(device)
 
         # Forward pass
-        out, _ = model(data)
+        out_feat, out_topo, _ = model(data)
 
-        # Loss (Target is only the first 3 columns (XYZ) since the remaning are the identities)
-        target_xyz = data.x[:, : model.feature_size]
-        loss = F.mse_loss(out, target_xyz)
+        # Target tensors
+        target_feat = data.x
+        target_topo = data.edge_attr
 
-        # To have a proper loss printing, we weight this for the size of the batch
+        # Reshape from [320, F] -> [64, 5, F]
+        out_feat_reshaped = out_feat.view(data.num_graphs, model.number_of_nodes, -1)
+        target_feat_reshaped = target_feat.view(
+            data.num_graphs, model.number_of_nodes, -1
+        )
+
+        # Compute MSE for features
+        # 0: Cube, 4: Hand vs. 1: Goal, 2: Table, 3: Base
+        loss_dynamic = F.mse_loss(
+            out_feat_reshaped[:, [0, 4], :], target_feat_reshaped[:, [0, 4], :]
+        )
+        loss_static = F.mse_loss(
+            out_feat_reshaped[:, [1, 2, 3], :], target_feat_reshaped[:, [1, 2, 3], :]
+        )
+        loss_features = (10.0 * loss_dynamic) + loss_static
+
+        # Compute topology MSE (weights)
+        loss_topology = F.mse_loss(out_topo, target_topo)
+
+        # Combine MSEs
+        loss = loss_features + loss_topology
+
         total_loss += loss.item() * data.num_graphs
 
     return total_loss / len(loader.dataset)
@@ -707,13 +751,11 @@ val_loader = GeoDataLoader(val_dataset, batch_size=GAT_BATCH_SIZE)
 # Get input feature dimension from the first graph (should be 6 in our case: XYZ + One-Hot Identity)
 num_nodes = data_list[0].x.shape[0]
 in_channels = data_list[0].x.shape[1]
-feature_size = in_channels - num_nodes
 
 # Prepare the GNN, optmizer etc.
 model = GATAutoencoder(
     number_of_nodes=num_nodes,
     in_channels=in_channels,
-    feature_size=feature_size,
     hidden_channels=GAT_HIDDEN_CHANNELS,
     latent_channels=GAT_LATENT_CHANNELS,
     heads=GAT_ATTENTION_HEADS,
@@ -805,14 +847,7 @@ def compute_and_store_embeddings(model, base_h5_path, output_h5_path):
                 graph = graph.to(device)
                 model.eval()
                 with torch.no_grad():
-                    emb = model.encode(
-                        graph.x,
-                        graph.edge_index,
-                        graph.edge_attr,
-                        torch.zeros(  # We do not have a PyG dataloader, so we need to make a dummy batch tensor: equivalently, a batch size of 1
-                            graph.x.shape[0], dtype=torch.long, device=graph.x.device
-                        ),
-                    )
+                    emb = model.encode(graph)
                 embeddings.append(emb.cpu().numpy().squeeze())
                 global_frame_idx += 1
             embeddings = np.stack(embeddings)
@@ -897,6 +932,12 @@ class MLPGraphStateBCPolicy(nn.Module):
 
     def __init__(self, z_dim, proprio_dim, gripper_dim, action_dim, hidden_dim):
         super().__init__()
+        self.z_dim = z_dim
+        self.proprio_dim = proprio_dim
+        self.gripper_dim = gripper_dim
+        self.action_dim = action_dim
+        self.hidden_dim = hidden_dim
+
         self.mlp = nn.Sequential(
             nn.Linear(z_dim + proprio_dim + gripper_dim, hidden_dim),
             nn.ReLU(),
@@ -906,7 +947,10 @@ class MLPGraphStateBCPolicy(nn.Module):
         )
 
     def forward(self, z, gripper, proprio):
-        # Combine the GAT latent embeddings (z) with proprioception
+        if z.num_dims == 3:
+            z = z.view(z.size(0), -1)
+
+        # Combine the GAT latent embeddings (z) with gripper and proprioception
         x = torch.cat([z, gripper, proprio], dim=-1)
         return self.mlp(x)
 
@@ -1006,7 +1050,8 @@ bc_val_loader = TorchDataLoader(bc_val_dataset, batch_size=BC_BATCH_SIZE)
 
 # Prepare the model, optmizer, eventually scheduler etc.
 policy = MLPGraphStateBCPolicy(
-    z_dim=GAT_LATENT_CHANNELS,
+    z_dim=GAT_LATENT_CHANNELS
+    * num_nodes,  # Flattened GAT latent embeddings for all nodes
     proprio_dim=BC_PROPRIO_DIM,
     gripper_dim=BC_GRIPPER_DIM,
     action_dim=BC_ACTION_DIM,
@@ -1229,22 +1274,11 @@ def evaluate_graph_policy(gae_model, bc_model, num_episodes=100):
                     "obs": obs,
                 }
             ]
-            built_graph = build_graph(
-                quick_dataset, 0
-            )  # We only have one frame, so idx=0 is fine
-
-            # Extract node features
-            x = built_graph.x.to(device)
-
-            # Extract topology and weights
-            edge_index = built_graph.edge_index.to(device)
-            edge_attr = built_graph.edge_attr.to(device)
-
-            # Batch array of zeros (all nodes belong to the same single graph)
-            batch_idx = torch.zeros(5, dtype=torch.long).to(device)
+            built_graph = build_graph(quick_dataset, 0)
+            built_graph = built_graph.to(device)
 
             with torch.no_grad():
-                z = gae_model.encode(x, edge_index, edge_attr, batch_idx)
+                z = gae_model.encode(built_graph)
 
                 gripper = obs[0, 18:26].detach().clone().unsqueeze(0).to(device)
                 proprio = (

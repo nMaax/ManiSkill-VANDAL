@@ -9,6 +9,7 @@
 
 import shutil
 import json
+import argparse
 from typing import Union
 from pathlib import Path
 from datetime import datetime
@@ -31,6 +32,16 @@ from mani_skill.utils.io_utils import load_json
 from mani_skill.utils import common
 import gymnasium as gym
 
+# Argument Parsing
+parser = argparse.ArgumentParser(description="ManiSkill GAT-BC Training and Benchmarking")
+parser.add_argument("--gat-epochs", type=int, default=10, help="Number of GAT epochs (default: 10)")
+parser.add_argument("--bc-epochs", type=int, default=50, help="Number of BC epochs (default: 50)")
+parser.add_argument("--benchmark", action=argparse.BooleanOptionalAction, default=True, help="Enable benchmarking (default: True)")
+parser.add_argument("--render", action=argparse.BooleanOptionalAction, default=True, help="Enable rendering (default: True)")
+parser.add_argument("--gat-checkpoint", type=str, default="gatautoencoder_best.pth", help="GAT checkpoint filename (default: gatautoencoder_best.pth)")
+parser.add_argument("--bc-checkpoint", type=str, default="bc_mlp_policy_best.pth", help="BC checkpoint filename (default: bc_mlp_policy_best.pth)")
+parser.add_argument("--baseline-checkpoint", type=str, default="baseline_policy_best.pth", help="Baseline checkpoint filename (default: baseline_policy_best.pth)")
+args = parser.parse_args()
 
 def seed_everything(seed: int) -> None:
     r"""Sets the seed for generating random numbers in :pytorch:`PyTorch`,
@@ -73,19 +84,19 @@ REPLAYED_JS_PATH = DS_PATH / "trajectory.state.pd_ee_delta_pos.physx_cpu.json"
 EMBEDDINGS_JS_PATH = REPLAYED_JS_PATH.with_suffix(".embeddings.json")
 
 # These are to load/save checkpoints
-GAT_CHECKPOINT_PATH = script_location / "gatautoencoder_best.pth"
-BC_CHECKPOINT_PATH = script_location / "bc_mlp_policy_best.pth"
-BASELINE_CHECKPOINT_PATH = script_location / "baseline_policy_best.pth"
+GAT_CHECKPOINT_PATH = script_location / args.gat_checkpoint
+BC_CHECKPOINT_PATH = script_location / args.bc_checkpoint
+BASELINE_CHECKPOINT_PATH = script_location / args.baseline_checkpoint
 
-BENCHMARK = True
-RENDER = True
+BENCHMARK = args.benchmark
+RENDER = args.render
 
 # Generic Hyperparameters
 SPLIT_RATIO = 0.8
 NOISE_STD = 0.01
 
 # GNN Hyperparameters
-GAT_EPOCHS = 10
+GAT_EPOCHS = args.gat_epochs
 GAT_LR = 1e-4
 GAT_BATCH_SIZE = 64
 GAT_HIDDEN_CHANNELS = 64
@@ -93,7 +104,7 @@ GAT_LATENT_CHANNELS = 8
 GAT_ATTENTION_HEADS = 4
 
 # BC Hyperparameters
-BC_EPOCHS = 50
+BC_EPOCHS = args.bc_epochs
 BC_LR = 1e-3
 BC_BATCH_SIZE = 1024
 BC_ACTION_DIM = 4

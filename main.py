@@ -752,6 +752,7 @@ val_loader = GeoDataLoader(val_dataset, batch_size=GAT_BATCH_SIZE)
 num_nodes = data_list[0].x.shape[0]
 in_channels = data_list[0].x.shape[1]
 
+# NOTE: another approach would be to directly train the whole BC + GAT model all togheter
 # Prepare the GNN, optmizer etc.
 model = GATAutoencoder(
     number_of_nodes=num_nodes,

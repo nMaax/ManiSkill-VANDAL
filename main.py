@@ -522,12 +522,12 @@ print("\n\n--- Phase 2: Representation Learning ---")
 class GATAutoencoder(nn.Module):
     def __init__(
         self,
+        number_of_nodes,
         in_channels,
+        feature_size,
         hidden_channels,
         latent_channels,
         heads,
-        feature_size,
-        number_of_nodes=5,
     ):
         super().__init__()
         # Number of features per node, identity excluded
@@ -671,12 +671,12 @@ feature_size = in_channels - num_nodes
 
 # Prepare the GNN, optmizer etc.
 model = GATAutoencoder(
+    number_of_nodes=num_nodes,
     in_channels=in_channels,
+    feature_size=feature_size,
     hidden_channels=GAT_HIDDEN_CHANNELS,
     latent_channels=GAT_LATENT_CHANNELS,
     heads=GAT_ATTENTION_HEADS,
-    feature_size=feature_size,
-    number_of_nodes=num_nodes,
 ).to(device)
 optimizer = torch.optim.AdamW(model.parameters(), lr=GAT_LR)
 

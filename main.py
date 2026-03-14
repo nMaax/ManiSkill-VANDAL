@@ -1037,7 +1037,7 @@ policy = ResNetGraphStateBCPolicy(
     dropout_p=BC_RES_DROPOUT,
 ).to(device)
 bc_optimizer = torch.optim.AdamW(policy.parameters(), lr=BC_LR)
-bc_scheduler = None
+bc_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(bc_optimizer, T_max=BC_EPOCHS)
 
 # Check for existence of a checkpoint and eventually load it
 best_bc_val_loss = float("inf")

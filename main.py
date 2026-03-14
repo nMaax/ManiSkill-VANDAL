@@ -709,6 +709,7 @@ num_nodes = data_list[0].x.shape[0]
 in_channels = data_list[0].x.shape[1]
 feature_size = in_channels - num_nodes
 
+# NOTE: another approach would be to directly train the whole BC + GAT model all togheter
 # Prepare the GNN, optmizer etc.
 model = GATAutoencoder(
     number_of_nodes=num_nodes,

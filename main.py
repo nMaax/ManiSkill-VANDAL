@@ -37,10 +37,10 @@ parser = argparse.ArgumentParser(
     description="ManiSkill GAT-BC Training and Benchmarking"
 )
 parser.add_argument(
-    "--gat-epochs", type=int, default=10, help="Number of GAT epochs (default: 10)"
+    "--gat-epochs", type=int, default=25, help="Number of GAT epochs (default: 10)"
 )
 parser.add_argument(
-    "--bc-epochs", type=int, default=50, help="Number of BC epochs (default: 50)"
+    "--bc-epochs", type=int, default=80, help="Number of BC epochs (default: 50)"
 )
 parser.add_argument(
     "--benchmark",
@@ -132,9 +132,9 @@ NOISE_STD = 0.01
 GAT_EPOCHS = args.gat_epochs
 GAT_LR = 1e-4
 GAT_BATCH_SIZE = 64
-GAT_HIDDEN_CHANNELS = 64
-GAT_LATENT_CHANNELS = 8
-GAT_ATTENTION_HEADS = 4
+GAT_HIDDEN_CHANNELS = 128
+GAT_LATENT_CHANNELS = 4
+GAT_ATTENTION_HEADS = 2
 
 # BC Hyperparameters
 BC_EPOCHS = args.bc_epochs
@@ -947,8 +947,9 @@ class MLPGraphStateBCPolicy(nn.Module):
         )
 
     def forward(self, z, gripper, proprio):
-        if z.num_dims == 3:
-            z = z.view(z.size(0), -1)
+
+        # Ensure correct z dimensionsonality
+        z = z.view(-1, self.z_dim)
 
         # Combine the GAT latent embeddings (z) with gripper and proprioception
         x = torch.cat([z, gripper, proprio], dim=-1)

@@ -863,19 +863,21 @@ def train_bc_epoch(model, loader, optimizer, scheduler, device, noise_std=0.01):
     for batch in loader:
         # Load data on device and reset the gradients
         z = batch["priv_states"]["embeddings"].to(device)
-        gripper = batch["obs"][:, 19:26].to(device)  # Gripper state
+        gripper = batch["obs"][:, 18:26].to(device)  # is_grasped + tcp_pose
         proprio = batch["priv_states"]["articulations"]["panda"][:, 13:31].to(device)
         target_action = batch["action"].to(device)
         optimizer.zero_grad()
 
         # Data augmentation
+        #
         # NOTE: Maybe this could lead to errors since TCP should be the consequence of the rest of the environment,
         # so adding noise to it may break the physical consistency of the data;
         # however, I think that if the noise is small enough, it should be fine and actually help the model to generalize better
         # anyway, ManiSkill benchmark doesnt do it
-        z = z + torch.randn_like(z) * noise_std
-        gripper = gripper + torch.randn_like(gripper) * (noise_std * 0.5)
-        proprio = proprio + torch.randn_like(proprio) * noise_std
+        #
+        # z = z + torch.randn_like(z) * noise_std
+        # gripper = gripper + torch.randn_like(gripper) * (noise_std * 0.5)
+        # proprio = proprio + torch.randn_like(proprio) * noise_std
 
         # Forward pass
         out = model(z, gripper, proprio)
@@ -903,7 +905,7 @@ def validate_bc(model, loader, device):
     for batch in loader:
         # Load data on device
         z = batch["priv_states"]["embeddings"].to(device)
-        gripper = batch["obs"][:, 19:26].to(device)  # Gripper state
+        gripper = batch["obs"][:, 18:26].to(device)  # Gripper state
         proprio = batch["priv_states"]["articulations"]["panda"][:, 13:31].to(device)
         target_action = batch["action"].to(device)
 
@@ -1042,15 +1044,18 @@ def train_baseline_epoch(model, loader, optimizer, device, noise_std):
         base = batch["priv_states"]["articulations"]["panda"][:, :3].to(device)
 
         # As before
-        gripper = batch["obs"][:, 19:26].to(device)
+        gripper = batch["obs"][:, 18:26].to(device)
         proprio = batch["priv_states"]["articulations"]["panda"][:, 13:31].to(device)
         target_action = batch["action"].to(device)
 
         raw_state = torch.cat([cube, goal, table, base, gripper, proprio], dim=-1)
-        noised_state = raw_state + torch.randn_like(raw_state) * noise_std
+
+        # NOTE: same as above
+        #
+        # noised_state = raw_state + torch.randn_like(raw_state) * noise_std
 
         optimizer.zero_grad()
-        out = model(noised_state)
+        out = model(raw_state)
         loss = F.mse_loss(out, target_action)
         loss.backward()
         optimizer.step()
@@ -1068,7 +1073,7 @@ def validate_baseline(model, loader, device):
         goal = batch["priv_states"]["actors"]["goal_site"][:, :3].to(device)
         table = batch["priv_states"]["actors"]["table-workspace"][:, :3].to(device)
         base = batch["priv_states"]["articulations"]["panda"][:, :3].to(device)
-        gripper = batch["obs"][:, 19:26].to(device)
+        gripper = batch["obs"][:, 18:26].to(device)
         proprio = batch["priv_states"]["articulations"]["panda"][:, 13:31].to(device)
 
         raw_state = torch.cat([cube, goal, table, base, gripper, proprio], dim=-1)

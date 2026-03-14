@@ -1101,7 +1101,7 @@ print("\n\n--- Phase 4.1: Baseline Benchmarking ---")
 
 
 class BaselineBCPolicy(nn.Module):
-    def __init__(self, raw_dim=38, action_dim=4, hidden_dim=64):
+    def __init__(self, raw_dim, action_dim, hidden_dim):
         super().__init__()
         self.mlp = nn.Sequential(
             nn.Linear(raw_dim, hidden_dim),
@@ -1168,7 +1168,7 @@ def validate_baseline(model, loader, device):
 
 if BENCHMARK:
     baseline_policy = BaselineBCPolicy(
-        raw_dim=37,
+        raw_dim=38,
         hidden_dim=BC_HIDDEN_DIM,
         action_dim=BC_ACTION_DIM,
     ).to(device)

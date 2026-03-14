@@ -9,6 +9,7 @@
 
 import shutil
 import json
+import argparse
 from typing import Union
 from pathlib import Path
 from datetime import datetime
@@ -30,6 +31,48 @@ from torch_geometric.loader import DataLoader as GeoDataLoader
 from mani_skill.utils.io_utils import load_json
 from mani_skill.utils import common
 import gymnasium as gym
+
+# Argument Parsing
+parser = argparse.ArgumentParser(
+    description="ManiSkill GAT-BC Training and Benchmarking"
+)
+parser.add_argument(
+    "--gat-epochs", type=int, default=10, help="Number of GAT epochs (default: 10)"
+)
+parser.add_argument(
+    "--bc-epochs", type=int, default=50, help="Number of BC epochs (default: 50)"
+)
+parser.add_argument(
+    "--benchmark",
+    action=argparse.BooleanOptionalAction,
+    default=True,
+    help="Enable benchmarking (default: True)",
+)
+parser.add_argument(
+    "--render",
+    action=argparse.BooleanOptionalAction,
+    default=True,
+    help="Enable rendering (default: True)",
+)
+parser.add_argument(
+    "--gat-checkpoint",
+    type=str,
+    default="gatautoencoder_best.pth",
+    help="GAT checkpoint filename (default: gatautoencoder_best.pth)",
+)
+parser.add_argument(
+    "--bc-checkpoint",
+    type=str,
+    default="bc_res_policy_best.pth",
+    help="BC checkpoint filename (default: bc_mlp_policy_best.pth)",
+)
+parser.add_argument(
+    "--baseline-checkpoint",
+    type=str,
+    default="baseline_policy_best.pth",
+    help="Baseline checkpoint filename (default: baseline_policy_best.pth)",
+)
+args = parser.parse_args()
 
 
 def seed_everything(seed: int) -> None:
@@ -73,19 +116,19 @@ REPLAYED_JS_PATH = DS_PATH / "trajectory.state.pd_ee_delta_pos.physx_cpu.json"
 EMBEDDINGS_JS_PATH = REPLAYED_JS_PATH.with_suffix(".embeddings.json")
 
 # These are to load/save checkpoints
-GAT_CHECKPOINT_PATH = script_location / "gatautoencoder_best.pth"
-BC_CHECKPOINT_PATH = script_location / "bc_res_policy_best.pth"
-BASELINE_CHECKPOINT_PATH = script_location / "baseline_policy_best.pth"
+GAT_CHECKPOINT_PATH = script_location / args.gat_checkpoint
+BC_CHECKPOINT_PATH = script_location / args.bc_checkpoint
+BASELINE_CHECKPOINT_PATH = script_location / args.baseline_checkpoint
 
-BENCHMARK = True
-RENDER = True
+BENCHMARK = args.benchmark
+RENDER = args.render
 
 # Generic Hyperparameters
 SPLIT_RATIO = 0.8
 NOISE_STD = 0.01
 
 # GNN Hyperparameters
-GAT_EPOCHS = 10
+GAT_EPOCHS = args.gat_epochs
 GAT_LR = 1e-4
 GAT_BATCH_SIZE = 64
 GAT_HIDDEN_CHANNELS = 64
@@ -93,7 +136,7 @@ GAT_LATENT_CHANNELS = 8
 GAT_ATTENTION_HEADS = 4
 
 # BC Hyperparameters
-BC_EPOCHS = 50
+BC_EPOCHS = args.bc_epochs
 BC_LR = 1e-3
 BC_BATCH_SIZE = 1024
 BC_ACTION_DIM = 4
@@ -892,7 +935,7 @@ class ResNetGraphStateBCPolicy(nn.Module):
         return self.output_layer(x)
 
 
-def train_bc_epoch(model, loader, optimizer, scheduler, device, noise_std=0.01):
+def train_bc_epoch(model, loader, optimizer, scheduler, device, noise_std=None):
     model.train()
     total_loss = 0
     for batch in loader:
@@ -909,10 +952,10 @@ def train_bc_epoch(model, loader, optimizer, scheduler, device, noise_std=0.01):
         # so adding noise to it may break the physical consistency of the data;
         # however, I think that if the noise is small enough, it should be fine and actually help the model to generalize better
         # anyway, ManiSkill benchmark doesnt do it
-        #
-        # z = z + torch.randn_like(z) * noise_std
-        # gripper = gripper + torch.randn_like(gripper) * (noise_std * 0.5)
-        # proprio = proprio + torch.randn_like(proprio) * noise_std
+        if noise_std is not None:
+            z = z + torch.randn_like(z) * noise_std
+            gripper = gripper + torch.randn_like(gripper) * (noise_std * 0.5)
+            proprio = proprio + torch.randn_like(proprio) * noise_std
 
         # Forward pass
         out = model(z, gripper, proprio)
@@ -1016,7 +1059,11 @@ else:
 # Train the model for the missing epochs
 for epoch in range(start_epoch, BC_EPOCHS):
     train_loss = train_bc_epoch(
-        policy, bc_train_loader, bc_optimizer, bc_scheduler, device, noise_std=NOISE_STD
+        policy,
+        bc_train_loader,
+        bc_optimizer,
+        bc_scheduler,
+        device,
     )
     val_loss = validate_bc(policy, bc_val_loader, device)
     print(
@@ -1068,7 +1115,7 @@ class BaselineBCPolicy(nn.Module):
         return self.mlp(raw_state)
 
 
-def train_baseline_epoch(model, loader, optimizer, device, noise_std):
+def train_baseline_epoch(model, loader, optimizer, device, noise_std=None):
     model.train()
     total_loss = 0
     for batch in loader:
@@ -1083,19 +1130,18 @@ def train_baseline_epoch(model, loader, optimizer, device, noise_std):
         proprio = batch["priv_states"]["articulations"]["panda"][:, 13:31].to(device)
         target_action = batch["action"].to(device)
 
-        raw_state = torch.cat([cube, goal, table, base, gripper, proprio], dim=-1)
+        state = torch.cat([cube, goal, table, base, gripper, proprio], dim=-1)
 
-        # NOTE: same as above
-        #
-        # noised_state = raw_state + torch.randn_like(raw_state) * noise_std
+        if noise_std is not None:
+            state = state + torch.randn_like(state) * noise_std
 
         optimizer.zero_grad()
-        out = model(raw_state)
+        out = model(state)
         loss = F.mse_loss(out, target_action)
         loss.backward()
         optimizer.step()
 
-        total_loss += loss.item() * raw_state.size(0)
+        total_loss += loss.item() * state.size(0)
     return total_loss / len(loader.dataset)
 
 
@@ -1148,7 +1194,6 @@ if BENCHMARK:
             bc_train_loader,
             baseline_optimizer,
             device,
-            noise_std=NOISE_STD,
         )
         val_loss = validate_baseline(baseline_policy, bc_val_loader, device)
         if epoch % 1 == 0:

@@ -33,15 +33,47 @@ from mani_skill.utils import common
 import gymnasium as gym
 
 # Argument Parsing
-parser = argparse.ArgumentParser(description="ManiSkill GAT-BC Training and Benchmarking")
-parser.add_argument("--gat-epochs", type=int, default=10, help="Number of GAT epochs (default: 10)")
-parser.add_argument("--bc-epochs", type=int, default=50, help="Number of BC epochs (default: 50)")
-parser.add_argument("--benchmark", action=argparse.BooleanOptionalAction, default=True, help="Enable benchmarking (default: True)")
-parser.add_argument("--render", action=argparse.BooleanOptionalAction, default=True, help="Enable rendering (default: True)")
-parser.add_argument("--gat-checkpoint", type=str, default="gatautoencoder_best.pth", help="GAT checkpoint filename (default: gatautoencoder_best.pth)")
-parser.add_argument("--bc-checkpoint", type=str, default="bc_mlp_policy_best.pth", help="BC checkpoint filename (default: bc_mlp_policy_best.pth)")
-parser.add_argument("--baseline-checkpoint", type=str, default="baseline_policy_best.pth", help="Baseline checkpoint filename (default: baseline_policy_best.pth)")
+parser = argparse.ArgumentParser(
+    description="ManiSkill GAT-BC Training and Benchmarking"
+)
+parser.add_argument(
+    "--gat-epochs", type=int, default=10, help="Number of GAT epochs (default: 10)"
+)
+parser.add_argument(
+    "--bc-epochs", type=int, default=50, help="Number of BC epochs (default: 50)"
+)
+parser.add_argument(
+    "--benchmark",
+    action=argparse.BooleanOptionalAction,
+    default=True,
+    help="Enable benchmarking (default: True)",
+)
+parser.add_argument(
+    "--render",
+    action=argparse.BooleanOptionalAction,
+    default=True,
+    help="Enable rendering (default: True)",
+)
+parser.add_argument(
+    "--gat-checkpoint",
+    type=str,
+    default="gatautoencoder_best.pth",
+    help="GAT checkpoint filename (default: gatautoencoder_best.pth)",
+)
+parser.add_argument(
+    "--bc-checkpoint",
+    type=str,
+    default="bc_mlp_policy_best.pth",
+    help="BC checkpoint filename (default: bc_mlp_policy_best.pth)",
+)
+parser.add_argument(
+    "--baseline-checkpoint",
+    type=str,
+    default="baseline_policy_best.pth",
+    help="Baseline checkpoint filename (default: baseline_policy_best.pth)",
+)
 args = parser.parse_args()
+
 
 def seed_everything(seed: int) -> None:
     r"""Sets the seed for generating random numbers in :pytorch:`PyTorch`,

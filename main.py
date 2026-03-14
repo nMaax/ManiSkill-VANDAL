@@ -281,9 +281,9 @@ class ManiSkillTrajectoryDataset(Dataset):
             if self.rewards is not None:
                 self.rewards = common.to_tensor(self.rewards, device=device)
             if self.success is not None:
-                self.success = common.to_tensor(self.terminated, device=device)
+                self.success = common.to_tensor(self.success, device=device)
             if self.fail is not None:
-                self.fail = common.to_tensor(self.truncated, device=device)
+                self.fail = common.to_tensor(self.fail, device=device)
 
     def __len__(self):
         return len(self.actions)
@@ -766,6 +766,7 @@ optimizer = torch.optim.AdamW(model.parameters(), lr=GAT_LR)
 # Check for existence of checkpoint to resume/skip training
 best_val_loss = float("inf")
 if GAT_CHECKPOINT_PATH.exists():
+    # WARNING: You should also load the seed state if you want to have a perfect reproducibility
     checkpoint = torch.load(GAT_CHECKPOINT_PATH)
     model.load_state_dict(checkpoint["model_state_dict"])
     optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
@@ -1065,6 +1066,7 @@ bc_scheduler = None
 # Check for existence of a checkpoint and eventually load it
 best_bc_val_loss = float("inf")
 if BC_CHECKPOINT_PATH.exists():
+    # WARNING: You should also load the seed state if you want to have a perfect reproducibility
     bc_checkpoint = torch.load(BC_CHECKPOINT_PATH)
     policy.load_state_dict(bc_checkpoint["model_state_dict"])
     bc_optimizer.load_state_dict(bc_checkpoint["optimizer_state_dict"])
@@ -1198,6 +1200,7 @@ if BENCHMARK:
 
     best_baseline_val_loss = float("inf")
     if BASELINE_CHECKPOINT_PATH.exists():
+        # WARNING: You should also load the seed state if you want to have a perfect reproducibility
         checkpoint = torch.load(BASELINE_CHECKPOINT_PATH)
         baseline_policy.load_state_dict(checkpoint["model_state_dict"])
         baseline_optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
@@ -1292,6 +1295,7 @@ def evaluate_graph_policy(gae_model, bc_model, num_episodes=100):
                 )
 
                 action = bc_model(z, gripper, proprio)
+                # Could rather use tanh as last activation function in the model to enforce this
                 action = torch.clamp(action, -1.0, 1.0)
 
             obs, reward, terminated, truncated, info = env.step(
@@ -1347,6 +1351,7 @@ def evaluate_baseline_policy(baseline_model, num_episodes=100):
 
             with torch.no_grad():
                 action = baseline_model(raw_state_tensor)
+                # Could rather use tanh as last activation function in the model to enforce this
                 action = torch.clamp(action, -1.0, 1.0)
 
             obs, reward, terminated, truncated, info = env.step(

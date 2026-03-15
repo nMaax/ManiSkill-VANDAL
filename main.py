@@ -116,7 +116,7 @@ SPLIT_RATIO = 0.8
 # BC Hyperparameters
 EPOCHS = args.epochs
 LR = 1e-4
-BATCH_SIZE = 1024
+BATCH_SIZE = 128
 ACTION_DIM = 4
 PROPRIO_DIM = 18
 GRIPPER_DIM = 8
@@ -769,11 +769,14 @@ class DiffusionAgent(nn.Module):
         obs_cond = obs_seq.flatten(start_dim=1)  # (B, obs_horizon * obs_dim)
 
         # sample noise to add to actions
-        noise = torch.randn((B, self.pred_horizon, self.act_dim), device=device)
+        noise = torch.randn((B, self.pred_horizon, self.act_dim), device=obs_seq.device)
 
         # sample a diffusion iteration for each data point
         timesteps = torch.randint(
-            0, self.noise_scheduler.config.num_train_timesteps, (B,), device=device
+            0,
+            self.noise_scheduler.config.num_train_timesteps,
+            (B,),
+            device=obs_seq.device,
         ).long()
 
         # add noise to the clean images(actions) according to the noise magnitude at each diffusion iteration
@@ -911,10 +914,23 @@ def validate(model, loader, device):
 
 # Split the dataset
 # WARNING: must be the same split of the GNN
+# WARNING: must split by trajectory, not by window index
 episode_lengths = get_all_episode_lengths(EMBEDDINGS_JS_PATH)
 num_train_episodes = int(SPLIT_RATIO * len(episode_lengths))
-train_indices = range(num_train_episodes)
-val_indices = range(num_train_episodes, len(episode_lengths))
+print(
+    f"Splitting dataset: {num_train_episodes} Train Episodes, {len(episode_lengths) - num_train_episodes} Val Episodes"
+)
+
+train_indices = []
+val_indices = []
+
+# dataset.slices contains (traj_idx, start, end, L)
+for i, slice_tuple in enumerate(dataset.slices):
+    traj_idx = slice_tuple[0]
+    if traj_idx < num_train_episodes:
+        train_indices.append(i)
+    else:
+        val_indices.append(i)
 
 train_dataset = torch.utils.data.Subset(dataset, train_indices)
 val_dataset = torch.utils.data.Subset(dataset, val_indices)
@@ -922,6 +938,9 @@ val_dataset = torch.utils.data.Subset(dataset, val_indices)
 # Move the data to the dataloaders
 train_loader = TorchDataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
 val_loader = TorchDataLoader(val_dataset, batch_size=BATCH_SIZE)
+
+# NOTE: Should really move on and forget about EPOCHS as people in this field do
+total_training_steps = len(train_loader) * EPOCHS
 
 # Prepare the model, optmizer, eventually scheduler etc.
 policy = DiffusionAgent(
@@ -935,11 +954,11 @@ policy = DiffusionAgent(
     n_groups=UNET_GROUPS,
 ).to(device)
 optimizer = torch.optim.AdamW(policy.parameters(), lr=LR)
-lr_scheduler = get_scheduler(
+lr_scheduler = get_scheduler(  # just as ManiSkill does
     name="cosine",
     optimizer=optimizer,
     num_warmup_steps=500,
-    num_training_steps=args.total_iters,
+    num_training_steps=total_training_steps,
 )
 
 # Check for existence of a checkpoint and eventually load it

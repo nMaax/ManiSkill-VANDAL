@@ -834,11 +834,7 @@ class DiffusionAgent(nn.Module):
         return noisy_action_seq[:, start:end]  # (B, act_horizon, act_dim)
 
 
-# TODO: Add EMAModel (Exponential Moving Average) to stabilize the UNet weights.
-# Remind about callig EMA.step()
-
-
-def train_epoch(model, loader, optimizer, scheduler, device):
+def train_epoch(model, loader, optimizer, scheduler, ema, device):
     model.train()
     total_loss = 0
 
@@ -876,6 +872,9 @@ def train_epoch(model, loader, optimizer, scheduler, device):
         # In Diffusion, LR schedulers step every batch
         if scheduler is not None:
             scheduler.step()
+
+        if ema is not None:
+            ema.step(model.parameters())
 
         # Weight the loss by batch size for an accurate epoch average
         total_loss += loss.item() * B
@@ -966,6 +965,12 @@ lr_scheduler = get_scheduler(  # just as ManiSkill does
     num_warmup_steps=500,
     num_training_steps=total_training_steps,
 )
+ema = EMAModel(
+    policy.parameters(),
+    decay=0.999,  # 0.999 is standard for Diffusion
+    inv_gamma=1.0,
+    power=0.75,
+)
 
 # Check for existence of a checkpoint and eventually load it
 best_val_loss = float("inf")
@@ -974,6 +979,10 @@ if CHECKPOINT_PATH.exists():
     checkpoint = torch.load(CHECKPOINT_PATH)
     policy.load_state_dict(checkpoint["model_state_dict"])
     optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+
+    if "ema_state_dict" in checkpoint:
+        ema.load_state_dict(checkpoint["ema_state_dict"])
+
     start_epoch = checkpoint.get("epoch", -1) + 1
     best_val_loss = checkpoint.get("val_loss", float("inf"))
     print(
@@ -991,6 +1000,7 @@ for epoch in range(start_epoch, EPOCHS):
         train_loader,
         optimizer,
         lr_scheduler,
+        ema,
         device,
     )
     val_loss = validate(policy, val_loader, device)
@@ -1002,6 +1012,7 @@ for epoch in range(start_epoch, EPOCHS):
         best_val_loss = val_loss
         checkpoint = {
             "model_state_dict": policy.state_dict(),
+            "ema_state_dict": ema.state_dict(),
             "optimizer_state_dict": optimizer.state_dict(),
             "epoch": epoch,
             "train_loss": train_loss,
@@ -1127,6 +1138,9 @@ def evaluate_graph_policy(gae_model, diff_model, num_episodes=100):
     print(f"Success rate: {sr}%")
     return sr
 
+
+ema.copy_to(policy.parameters())
+policy.eval()
 
 gnn_model = GATAutoencoder(
     NUM_NODES,

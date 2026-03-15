@@ -89,6 +89,9 @@ EMBEDDINGS_JS_PATH = REPLAYED_JS_PATH.with_suffix(".embeddings.json")
 # These are to load/save checkpoints
 GAT_CHECKPOINT_PATH = script_location / args.gat_checkpoint
 
+# Graph parameters
+NUM_NODES = 5  # Cube, Goal, Table, Robot Base, Hand
+IN_CHANNELS = 6  # XYZ + Bounding Box Size
 
 # Hyperparameters
 SPLIT_RATIO = 0.8
@@ -617,6 +620,15 @@ if __name__ == "__main__":
     # Get input feature dimension from the first graph (should be 6 in our case: XYZ + One-Hot Identity)
     num_nodes = data_list[0].x.shape[0]
     in_channels = data_list[0].x.shape[1]
+
+    assert (
+        NUM_NODES == num_nodes,
+        "Expected number of nodes does not match the one in the graph data",
+    )
+    assert (
+        IN_CHANNELS == in_channels,
+        "Expected input feature dimension does not match the one in the graph data",
+    )
 
     # NOTE: another approach would be to directly train the whole BC + GAT model all togheter
     # Prepare the GNN, optmizer etc.

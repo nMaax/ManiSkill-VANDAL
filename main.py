@@ -11,7 +11,6 @@ import argparse
 from typing import Union
 from pathlib import Path
 from datetime import datetime
-from torch.optim.lr_scheduler import CosineAnnealingLR
 from tqdm import tqdm
 import math
 
@@ -30,8 +29,16 @@ from mani_skill.utils import common
 import gymnasium as gym
 
 from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
+from diffusers.training_utils import EMAModel
+from diffusers.optimization import get_scheduler
 
-from gnn import print_dict_tree, get_all_episode_lengths, build_graph
+from gnn import (
+    print_dict_tree,
+    get_all_episode_lengths,
+    build_graph,
+    GAT_LATENT_CHANNELS,
+    NUM_NODES,
+)
 
 
 # Argument Parsing
@@ -113,6 +120,7 @@ BATCH_SIZE = 1024
 ACTION_DIM = 4
 PROPRIO_DIM = 18
 GRIPPER_DIM = 8
+Z_DIM = GAT_LATENT_CHANNELS * NUM_NODES
 UNET_DIMS = [64, 128, 256]
 UNET_GROUPS = 8
 
@@ -123,10 +131,155 @@ ACT_HORIZON = 8
 NUM_DIFFUSION_ITERS = 100
 DIFF_STEP_EMBED_DIM = 64
 
+# *** NOTES ON HOW TO ACCESS DATA ***
+#
+# ** Privilege states **
+#
+# Note that `env_states` is simply a direct memory dump from the underlying SAPIENS engine
+#
+# Actors: 13 dimensions for position + quaternon + velocity + angular_velocity
+# Articulations: 31 dimensions for position + quaternon + velocity + angular_velocity of root state + joints
+#
+#   Note:   articulations is not intended as 7 actors (arms) + 2 (gripper hands), which would lead to (7+2)*13 dimensions
+#
+#           When two objects are joined by a hinge (a revolute joint), they lose almost all their relative freedom.
+#           A free-floating actor has 6 DOFs (3 translation, 3 rotation). Once you bolt it to another actor with a hinge,
+#           it only has 1 DOF relative to its parent—it can only rotate around one axis.
+#
+#           So we rather reduce coordinates of such hinged actors by taking a root (usually the 000 coordinate or the base)
+#           bringing 13 dimensions (just as before) and joint position (1) + joint velocity (1) for each hinged actor (7 for arm + 2 for gripper hand)
+#           so we get 13 + 9*(2) = 13 + 18 = 31
+#
+#   Indexing of actors arrays
+#
+#           pose.p            -> 3  (x,y,z)
+#           pose.q            -> 4  (quaternion w,x,y,z)
+#           linear_velocity   -> 3
+#           angular_velocity  -> 3
+#
+#   Indexing of articulations arrays
+#
+#           (ALL COSTANTS)
+#           0:3   root position
+#           3:7   root quaternion
+#           7:10  root linear velocity
+#           10:13 root angular velocity
+#
+#           (THESE CHANGE)
+#           13:22 joint positions (9)
+#           22:31 joint velocities (9)
+#
+#   References:
+#       https://maniskill.readthedocs.io/en/latest/_modules/mani_skill/utils/structs/actor.html
+#       https://maniskill.readthedocs.io/en/latest/_modules/mani_skill/utils/structs/articulation.html
+#
+# ** Observations **
+#
+# Note that SAPIENS tracks the world using the absolute minimum variables required to calculate collisions and gravity
+# For this reason The "Hand" (or Tool Center Point - TCP) is not a physics object tracked.
+# It is an imaginary geometric point floating between the two gripper fingers.
+# To find out where the hand actually is in 3D space, you have to run Forward Kinematics—multiplying all 9 joint angles through a complex kinematic tree.
+# ManiSkill's environment automatically runs that math and injects the result into the obs array, i.e.:
+#
+#   Indices,    Size,   Description
+#
+#   [0:9],      9,      qpos: Joint Angles (7 arm joints + 2 gripper fingers) -> SAME AS ENV_STATE
+#   [9:18],     9,      qvel: Joint Velocities -> SAME AS ENV_STATE
+#   []          0,      controller (often empty)
+#   [18]        1,      is_grasped: bool
+#   [19:22],    3,      tcp_pose (Position): X, Y, Z
+#   [22:26],    4,      tcp_pose (Quaternion): W, X, Y, Z
+#   [26:29]     3,      goal_pose (Position only): X, Y, Z
+#   [29:42],    13,      Other Task-specific data, only included if "state" in obs_mode:
+#                           "obj_pose": raw_pose,                         # Shape: (batch_size, 7) - Cube pose [x, y, z, qx, qy, qz, qw]
+#                           "tcp_to_obj_pos": tensor,                     # Shape: (batch_size, 3) - Vector from TCP to cube
+#                           "obj_to_goal_pos": tensor,                    # Shape: (batch_size, 3) - Vector from cube to goal
+#
+# Indeed, we can run:
+#
+# data = h5py.File(REPLAYED_H5_PATH, "r")
+#
+# Get Frame 0, then slice features 13 to 31
+# print(data["traj_0"]["env_states"]["articulations"]["panda"][0, 13:31])
+#
+# Get Frame 0, then slice features 0 to 18
+# print(data["traj_0"]["obs"][0, 0:18])
+#
+# And they will be identical
+#
+# Same goes for
+#
+# Get Frame 999, then slice over the cube pose (position and quaternon)
+# data['traj_999']['env_states']['actors']['cube'][:5, :7]
+#
+# and
+#
+# Get Frame 999, then slice over observations for obj_pose
+# data['traj_999']['obs'][:5, 29:36]
+#
+# As well as
+#
+# Get Frame 999, goal site XYZ
+# data['traj_999']['env_states']['actors']['goal_site'][:5, :3]
+#
+# againsts
+#
+# Get Frame 999, goal_pose (no quaternon)
+# data['traj_999']['obs'][:5, 26:29]
+#
+# Reference:
+#
+#       https://maniskill.readthedocs.io/en/latest/user_guide/concepts/observation.html#state-dict
+#       https://maniskill.readthedocs.io/en/v3.0.0b10/_modules/mani_skill/envs/sapien_env.html#BaseEnv.get_obs
+#       https://maniskill.readthedocs.io/en/latest/_modules/mani_skill/agents/base_agent.html#BaseAgent.get_proprioception
+#       https://maniskill.readthedocs.io/en/latest/_modules/mani_skill/envs/tasks/tabletop/pick_cube.html#PickCubeEnv._get_obs_extra
+#       See mani_skill/envs/tasks/tabletop/pick_cube.py#L132-L145 for what values are returned as extras in obs
+#
+# ** Comments **
+#
+# Table is always the same thorugh all episodes, and for all frames of the episode
+# Goal instead may change between episodes, but within the same is constant
+# Cube always change obv, articulations as well
+#
+# Now, a couple of considerations:
+#   1.  Even if some objects are constant, it doesnt mean they are useless; in a graph they can still
+#       serve as relative "anchor" positions, which would actually make the learning generalize better into
+#       other settings (informing about its "new" base/anchor, e.g. the robot could be ancored on the table, or the wall, or the floor)
+#   2.  There is a thing called Proprioception, which is the capacity for the robot to understand where itself is in space
+#       so informing it about its own presence of arms (othern than the hand itself) would be useful anyway, even if we have PID modules
+#       which would compute these automtically based on the action sent to move the arm (indeed, knowing where its own base/anchor is, is Proprioception aswell!!)
+#
+# So a nice graph could be made of nodes being goal, hand1, hand2, table, anchor, cube (eventually the other arm joints for better Proprioception)
+# each node would carry its own dedicated values in the dataset
+#
+# Then we make a complete graph with euclidean distance as weight for the edges, however we could cut distances below a threshold
+# and enforce our own edges/non-edges, e.g., we could make the table node connected to the anchor only for simplicity
+#
+# Note sill that informing our robot about goal and the arm/hand positions is NOT data leaking, as we are not
+# informing it about which actions to take! We are only tellig it that the goal is specifically there in space, and its own body is somewhere else
+#
+# Preprocessing, dropout or batch norm will not be contemplated in the following, nor lr scheduler and other sophisticated tools
+# as this is supposed to be some simple showcase; furthermore remind that all the controllers have a normalized
+# action space ([-1, 1]) in Franka Emilia Panda robot, except arm_pd_joint_pos and arm_pd_joint_pos_vel
 
-# %% *** Phase 1: Scene Graph Engineering ***
 
-print("\n\n--- Phase 1: Data extraction ---")
+# In ManiSkill examples/, the PickCube-v1 task is addressed using three primary architectures:
+#
+#   1. Behavioral Cloning (BC): A MLP with two hidden layers of 256 units and ReLU activations
+#       - Trained on the whole dataset (no validation/test set)
+#       - Trains on the whole obs group, then compares over actions via MSE
+#       - Adam with 3e-4 LR
+#       - Batch size of 1024
+#       - 1 000 000 training iterations, 1 iteration = 1 batch
+#      A second version uses a custom PlainConv visual encoder consisting of five convolutional layers (with ReLU and
+#      MaxPool) to process RGB-D images. The resulting visual features are concatenated with the robot's state and passed to the MLP
+#   2. Action Chunking with Transformers (ACT)
+#   3. Diffusion Policy
+#
+#   Reference
+#       examples/baselines/bc,
+#       examples/baselines/act,
+#       examples/baselines/diffusion_policy
 
 
 # loads h5 data into memory for faster access
@@ -294,156 +447,6 @@ print(
     }, i.e., number of windows extracted (-> (traj where the windows was extracted, start frame in such trajectory, end fram in such trajectory, full lenght of the trajectory) 4-ple for training later"""
 )
 print_dict_tree(dataset[0])
-
-# *** NOTES ON HOW TO ACCESS DATA ***
-#
-# ** Privilege states **
-#
-# Note that `env_states` is simply a direct memory dump from the underlying SAPIENS engine
-#
-# Actors: 13 dimensions for position + quaternon + velocity + angular_velocity
-# Articulations: 31 dimensions for position + quaternon + velocity + angular_velocity of root state + joints
-#
-#   Note:   articulations is not intended as 7 actors (arms) + 2 (gripper hands), which would lead to (7+2)*13 dimensions
-#
-#           When two objects are joined by a hinge (a revolute joint), they lose almost all their relative freedom.
-#           A free-floating actor has 6 DOFs (3 translation, 3 rotation). Once you bolt it to another actor with a hinge,
-#           it only has 1 DOF relative to its parent—it can only rotate around one axis.
-#
-#           So we rather reduce coordinates of such hinged actors by taking a root (usually the 000 coordinate or the base)
-#           bringing 13 dimensions (just as before) and joint position (1) + joint velocity (1) for each hinged actor (7 for arm + 2 for gripper hand)
-#           so we get 13 + 9*(2) = 13 + 18 = 31
-#
-#   Indexing of actors arrays
-#
-#           pose.p            -> 3  (x,y,z)
-#           pose.q            -> 4  (quaternion w,x,y,z)
-#           linear_velocity   -> 3
-#           angular_velocity  -> 3
-#
-#   Indexing of articulations arrays
-#
-#           (ALL COSTANTS)
-#           0:3   root position
-#           3:7   root quaternion
-#           7:10  root linear velocity
-#           10:13 root angular velocity
-#
-#           (THESE CHANGE)
-#           13:22 joint positions (9)
-#           22:31 joint velocities (9)
-#
-#   References:
-#       https://maniskill.readthedocs.io/en/latest/_modules/mani_skill/utils/structs/actor.html
-#       https://maniskill.readthedocs.io/en/latest/_modules/mani_skill/utils/structs/articulation.html
-#
-# ** Observations **
-#
-# Note that SAPIENS tracks the world using the absolute minimum variables required to calculate collisions and gravity
-# For this reason The "Hand" (or Tool Center Point - TCP) is not a physics object tracked.
-# It is an imaginary geometric point floating between the two gripper fingers.
-# To find out where the hand actually is in 3D space, you have to run Forward Kinematics—multiplying all 9 joint angles through a complex kinematic tree.
-# ManiSkill's environment automatically runs that math and injects the result into the obs array, i.e.:
-#
-#   Indices,    Size,   Description
-#
-#   [0:9],      9,      qpos: Joint Angles (7 arm joints + 2 gripper fingers) -> SAME AS ENV_STATE
-#   [9:18],     9,      qvel: Joint Velocities -> SAME AS ENV_STATE
-#   []          0,      controller (often empty)
-#   [18]        1,      is_grasped: bool
-#   [19:22],    3,      tcp_pose (Position): X, Y, Z
-#   [22:26],    4,      tcp_pose (Quaternion): W, X, Y, Z
-#   [26:29]     3,      goal_pose (Position only): X, Y, Z
-#   [29:42],    13,      Other Task-specific data, only included if "state" in obs_mode:
-#                           "obj_pose": raw_pose,                         # Shape: (batch_size, 7) - Cube pose [x, y, z, qx, qy, qz, qw]
-#                           "tcp_to_obj_pos": tensor,                     # Shape: (batch_size, 3) - Vector from TCP to cube
-#                           "obj_to_goal_pos": tensor,                    # Shape: (batch_size, 3) - Vector from cube to goal
-#
-# Indeed, we can run:
-#
-# data = h5py.File(REPLAYED_H5_PATH, "r")
-#
-# Get Frame 0, then slice features 13 to 31
-# print(data["traj_0"]["env_states"]["articulations"]["panda"][0, 13:31])
-#
-# Get Frame 0, then slice features 0 to 18
-# print(data["traj_0"]["obs"][0, 0:18])
-#
-# And they will be identical
-#
-# Same goes for
-#
-# Get Frame 999, then slice over the cube pose (position and quaternon)
-# data['traj_999']['env_states']['actors']['cube'][:5, :7]
-#
-# and
-#
-# Get Frame 999, then slice over observations for obj_pose
-# data['traj_999']['obs'][:5, 29:36]
-#
-# As well as
-#
-# Get Frame 999, goal site XYZ
-# data['traj_999']['env_states']['actors']['goal_site'][:5, :3]
-#
-# againsts
-#
-# Get Frame 999, goal_pose (no quaternon)
-# data['traj_999']['obs'][:5, 26:29]
-#
-# Reference:
-#
-#       https://maniskill.readthedocs.io/en/latest/user_guide/concepts/observation.html#state-dict
-#       https://maniskill.readthedocs.io/en/v3.0.0b10/_modules/mani_skill/envs/sapien_env.html#BaseEnv.get_obs
-#       https://maniskill.readthedocs.io/en/latest/_modules/mani_skill/agents/base_agent.html#BaseAgent.get_proprioception
-#       https://maniskill.readthedocs.io/en/latest/_modules/mani_skill/envs/tasks/tabletop/pick_cube.html#PickCubeEnv._get_obs_extra
-#       See mani_skill/envs/tasks/tabletop/pick_cube.py#L132-L145 for what values are returned as extras in obs
-#
-# ** Comments **
-#
-# Table is always the same thorugh all episodes, and for all frames of the episode
-# Goal instead may change between episodes, but within the same is constant
-# Cube always change obv, articulations as well
-#
-# Now, a couple of considerations:
-#   1.  Even if some objects are constant, it doesnt mean they are useless; in a graph they can still
-#       serve as relative "anchor" positions, which would actually make the learning generalize better into
-#       other settings (informing about its "new" base/anchor, e.g. the robot could be ancored on the table, or the wall, or the floor)
-#   2.  There is a thing called Proprioception, which is the capacity for the robot to understand where itself is in space
-#       so informing it about its own presence of arms (othern than the hand itself) would be useful anyway, even if we have PID modules
-#       which would compute these automtically based on the action sent to move the arm (indeed, knowing where its own base/anchor is, is Proprioception aswell!!)
-#
-# So a nice graph could be made of nodes being goal, hand1, hand2, table, anchor, cube (eventually the other arm joints for better Proprioception)
-# each node would carry its own dedicated values in the dataset
-#
-# Then we make a complete graph with euclidean distance as weight for the edges, however we could cut distances below a threshold
-# and enforce our own edges/non-edges, e.g., we could make the table node connected to the anchor only for simplicity
-#
-# Note sill that informing our robot about goal and the arm/hand positions is NOT data leaking, as we are not
-# informing it about which actions to take! We are only tellig it that the goal is specifically there in space, and its own body is somewhere else
-#
-# Preprocessing, dropout or batch norm will not be contemplated in the following, nor lr scheduler and other sophisticated tools
-# as this is supposed to be some simple showcase; furthermore remind that all the controllers have a normalized
-# action space ([-1, 1]) in Franka Emilia Panda robot, except arm_pd_joint_pos and arm_pd_joint_pos_vel
-
-
-# In ManiSkill examples/, the PickCube-v1 task is addressed using three primary architectures:
-#
-#   1. Behavioral Cloning (BC): A MLP with two hidden layers of 256 units and ReLU activations
-#       - Trained on the whole dataset (no validation/test set)
-#       - Trains on the whole obs group, then compares over actions via MSE
-#       - Adam with 3e-4 LR
-#       - Batch size of 1024
-#       - 1 000 000 training iterations, 1 iteration = 1 batch
-#      A second version uses a custom PlainConv visual encoder consisting of five convolutional layers (with ReLU and
-#      MaxPool) to process RGB-D images. The resulting visual features are concatenated with the robot's state and passed to the MLP
-#   2. Action Chunking with Transformers (ACT)
-#   3. Diffusion Policy
-#
-#   Reference
-#       examples/baselines/bc,
-#       examples/baselines/act,
-#       examples/baselines/diffusion_policy
 
 
 class SinusoidalPosEmb(nn.Module):
@@ -745,7 +748,7 @@ class DiffusionAgent(nn.Module):
         self.obs_dim = obs_dim
 
         self.noise_pred_net = ConditionalUnet1D(
-            input_dim=self.act_dim,  # act_horizon is not used (U-Net doesn't care)
+            input_dim=self.act_dim,  # act_horizon is not used (U-Net doesn't care) NOTE: I dont agree, anyway, this is like RGB for images
             global_cond_dim=self.obs_horizon * self.obs_dim,
             diffusion_step_embed_dim=diffusion_step_embed_dim,
             down_dims=unet_dims,
@@ -829,61 +832,79 @@ class DiffusionAgent(nn.Module):
 def train_epoch(model, loader, optimizer, scheduler, device):
     model.train()
     total_loss = 0
-    for batch in loader:
-        # Load data on device and reset the gradients
-        # NOTE: z was also computed based on some of the above raw tensors,
-        # this is not redundant anyway since the GAT can learn to combine these features in a non-linear way
-        # TODO: In train_bc_epoch, flatten the obs_seq from [Batch, 2, 66] to [Batch, 132] to use as global_cond.
-        z = batch["priv_states"]["embeddings"].to(device)
-        gripper = batch["obs"][:, 18:26].to(device)  # is_grasped + tcp_pose
-        proprio = batch["priv_states"]["articulations"]["panda"][:, 13:31].to(device)
-        target_action = batch["action"].to(device)
 
-        obs_seq = torch.cat(
-            [z.view(), gripper, proprio], dim=-1
-        )  # (B, obs_horizon, obs_dim)
+    for batch in loader:
+        optimizer.zero_grad()  # Best practice is to zero_grad at the start of the loop
+
+        # Extract data, keeping the time dimension intact -> [Batch, Obs_Horizon, ...]
+        z = batch["priv_states_seq"]["embeddings"].to(device)
+        gripper = batch["obs_seq"][:, :, 18:26].to(
+            device
+        )  # Notice the extra ':' for the time dimension!
+        proprio = batch["priv_states_seq"]["articulations"]["panda"][:, :, 13:31].to(
+            device
+        )
+
+        target_action = batch["action_seq"].to(device)  # [Batch, Pred_Horizon, 4]
+
+        # Ensure z is flattened across the node dimension -> [Batch, Obs_Horizon, 40]
+        B, L = gripper.shape[0], gripper.shape[1]
+        z = z.view(B, L, -1)
+
+        # Concatenate into a single conditioning sequence -> [Batch, Obs_Horizon, 66]
+        obs_seq = torch.cat([z, gripper, proprio], dim=-1)
 
         # Forward pass
         loss = model.compute_loss(
-            # TODO: Use the proper tensors
-            obs_seq=batch["observations"],  # obs_batch_dict['state'] is (B, L, obs_dim)
-            action_seq=batch["actions"],  # (B, L, act_dim)
+            obs_seq=obs_seq,
+            action_seq=target_action,
         )
 
         # Backward pass
-        optimizer.zero_grad()
         loss.backward()
         optimizer.step()
 
-        # To have a proper loss printing, we weight this for the size of the batch
-        total_loss += loss.item() * z.size(0)
+        # In Diffusion, LR schedulers step every batch
+        if scheduler is not None:
+            scheduler.step()
 
-    if scheduler is not None:
-        scheduler.step()
+        # Weight the loss by batch size for an accurate epoch average
+        total_loss += loss.item() * B
 
     return total_loss / len(loader.dataset)
 
 
-# TODO: update just like train
 @torch.no_grad()
 def validate(model, loader, device):
     model.eval()
     total_loss = 0
+
     for batch in loader:
-        # Load data on device
-        z = batch["priv_states"]["embeddings"].to(device)
-        gripper = batch["obs"][:, 18:26].to(device)  # Gripper state
-        proprio = batch["priv_states"]["articulations"]["panda"][:, 13:31].to(device)
-        target_action = batch["action"].to(device)
+        # Extract data
+        z = batch["priv_states_seq"]["embeddings"].to(device)
+        gripper = batch["obs_seq"][:, :, 18:26].to(device)
+        proprio = batch["priv_states_seq"]["articulations"]["panda"][:, :, 13:31].to(
+            device
+        )
 
-        # Forward pass
-        out = model(z, gripper, proprio)
+        target_action = batch["action_seq"].to(device)
 
-        # Loss
-        loss = F.mse_loss(out, target_action)
+        B, L = gripper.shape[0], gripper.shape[1]
+        z = z.view(B, L, -1)
 
-        # To have a proper loss printing, we weight this for the size of the batch
-        total_loss += loss.item() * z.size(0)
+        # Concatenate
+        obs_seq = torch.cat([z, gripper, proprio], dim=-1)
+
+        # Calculate validation loss
+        # NOTE: We use `compute_loss` here instead of full denoising.
+        # Running 100 diffusion steps for every validation batch would take hours.
+        # `compute_loss` cleanly tracks if the UNet is overfitting the noise predictions
+        loss = model.compute_loss(
+            obs_seq=obs_seq,
+            action_seq=target_action,
+        )
+
+        total_loss += loss.item() * B
 
     return total_loss / len(loader.dataset)
 
@@ -908,13 +929,18 @@ policy = DiffusionAgent(
     act_horizon=ACT_HORIZON,
     pred_horizon=PRED_HORIZON,
     action_dim=ACTION_DIM,
-    obs_dim=PROPRIO_DIM + GRIPPER_DIM,
+    obs_dim=Z_DIM + PROPRIO_DIM + GRIPPER_DIM,
     diffusion_step_embed_dim=DIFF_STEP_EMBED_DIM,
     unet_dims=UNET_DIMS,
     n_groups=UNET_GROUPS,
 ).to(device)
 optimizer = torch.optim.AdamW(policy.parameters(), lr=LR)
-scheduler = CosineAnnealingLR(optimizer, T_max=EPOCHS)
+lr_scheduler = get_scheduler(
+    name="cosine",
+    optimizer=optimizer,
+    num_warmup_steps=500,
+    num_training_steps=args.total_iters,
+)
 
 # Check for existence of a checkpoint and eventually load it
 best_val_loss = float("inf")
@@ -939,12 +965,12 @@ for epoch in range(start_epoch, EPOCHS):
         policy,
         train_loader,
         optimizer,
-        scheduler,
+        lr_scheduler,
         device,
     )
     val_loss = validate(policy, val_loader, device)
     print(
-        f"BC Epoch {epoch:03d}, Train Action MSE: {train_loss:.5f}, Val Action MSE: {val_loss:.5f}"
+        f"Diffusion epoch {epoch:03d}, Train Action MSE: {train_loss:.5f}, Val Action MSE: {val_loss:.5f}"
     )
 
     if val_loss < best_val_loss:
@@ -960,7 +986,7 @@ for epoch in range(start_epoch, EPOCHS):
                 "act_horizon": ACT_HORIZON,
                 "pred_horizon": PRED_HORIZON,
                 "action_dim": ACTION_DIM,
-                "obs_dim": PROPRIO_DIM + GRIPPER_DIM,
+                "obs_dim": Z_DIM + PROPRIO_DIM + GRIPPER_DIM,
                 "diffusion_step_embed_dim": DIFF_STEP_EMBED_DIM,
                 "unet_dims": UNET_DIMS,
                 "n_groups": UNET_GROUPS,
@@ -974,7 +1000,7 @@ for epoch in range(start_epoch, EPOCHS):
         torch.save(checkpoint, CHECKPOINT_PATH)
         print(f"\t>New best diffusion model saved with Val MSE: {val_loss:.5f}")
 
-# Load the best model weights for later phases
+# Load the best model weights
 if CHECKPOINT_PATH.exists():
     print(f"Loading best diffusion model from {CHECKPOINT_PATH}")
     checkpoint = torch.load(CHECKPOINT_PATH)

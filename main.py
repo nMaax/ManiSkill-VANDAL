@@ -11,6 +11,7 @@ import argparse
 from typing import Union
 from pathlib import Path
 from datetime import datetime
+from torch.optim.lr_scheduler import CosineAnnealingLR
 from tqdm import tqdm
 import math
 
@@ -38,32 +39,21 @@ parser = argparse.ArgumentParser(
     description="ManiSkill GAT-BC Training and Benchmarking"
 )
 parser.add_argument(
-    "--bc-epochs", type=int, default=80, help="Number of BC epochs (default: 50)"
-)
-parser.add_argument(
-    "--benchmark",
-    action=argparse.BooleanOptionalAction,
-    default=True,
-    help="Enable benchmarking (default: True)",
+    "--epochs", type=int, default=100, help="Number of epochs (default: 100)"
 )
 parser.add_argument(
     "--render",
     action=argparse.BooleanOptionalAction,
     default=True,
-    help="Enable rendering (default: True)",
+    help="Enable rendering",
 )
 parser.add_argument(
-    "--bc-checkpoint",
+    "--checkpoint",
     type=str,
-    default="bc_mlp_policy_best.pth",
-    help="BC checkpoint filename (default: bc_mlp_policy_best.pth)",
+    default="diff_unet_policy_best.pth",
+    help="Diffusion checkpoint filename (default: diff_unet_policy_best.pth)",
 )
-parser.add_argument(
-    "--baseline-checkpoint",
-    type=str,
-    default="baseline_policy_best.pth",
-    help="Baseline checkpoint filename (default: baseline_policy_best.pth)",
-)
+
 args = parser.parse_args()
 
 
@@ -108,30 +98,31 @@ REPLAYED_JS_PATH = DS_PATH / "trajectory.state.pd_ee_delta_pos.physx_cpu.json"
 EMBEDDINGS_JS_PATH = REPLAYED_JS_PATH.with_suffix(".embeddings.json")
 
 # These are to load/save checkpoints
-BC_CHECKPOINT_PATH = script_location / args.bc_checkpoint
-BASELINE_CHECKPOINT_PATH = script_location / args.baseline_checkpoint
+CHECKPOINT_PATH = script_location / args.checkpoint
 
 # Flags for run later
-BENCHMARK = args.benchmark
 RENDER = args.render
 
 # Generic Hyperparameters
 SPLIT_RATIO = 0.8
 
 # BC Hyperparameters
-BC_EPOCHS = args.bc_epochs
-BC_LR = 1e-3
-BC_BATCH_SIZE = 1024
-BC_ACTION_DIM = 4
-BC_PROPRIO_DIM = 18
-BC_GRIPPER_DIM = 8
-BC_HIDDEN_DIM = 256
+EPOCHS = args.epochs
+LR = 1e-4
+BATCH_SIZE = 1024
+ACTION_DIM = 4
+PROPRIO_DIM = 18
+GRIPPER_DIM = 8
+UNET_DIMS = [64, 128, 256]
+UNET_GROUPS = 8
 
 # Diffusion Hyperparameters
 OBS_HORIZON = 2
 PRED_HORIZON = 16
 ACT_HORIZON = 8
 NUM_DIFFUSION_ITERS = 100
+DIFF_STEP_EMBED_DIM = 64
+
 
 # %% *** Phase 1: Scene Graph Engineering ***
 
@@ -296,7 +287,7 @@ class ManiSkillTrajectoryDataset(Dataset):
         }
 
 
-dataset = ManiSkillTrajectoryDataset(REPLAYED_H5_PATH, OBS_HORIZON, PRED_HORIZON)
+dataset = ManiSkillTrajectoryDataset(EMBEDDINGS_H5_PATH, OBS_HORIZON, PRED_HORIZON)
 print(
     f"""Dataset lenght: {
         len(dataset)
@@ -831,11 +822,11 @@ class DiffusionAgent(nn.Module):
         return noisy_action_seq[:, start:end]  # (B, act_horizon, act_dim)
 
 
-# TODO (later): Add EMAModel (Exponential Moving Average) to stabilize the UNet weights.
+# TODO: Add EMAModel (Exponential Moving Average) to stabilize the UNet weights.
 # Remind about callig EMA.step()
 
 
-def train_bc_epoch(model, loader, optimizer, scheduler, device, noise_std=None):
+def train_epoch(model, loader, optimizer, scheduler, device):
     model.train()
     total_loss = 0
     for batch in loader:
@@ -847,6 +838,10 @@ def train_bc_epoch(model, loader, optimizer, scheduler, device, noise_std=None):
         gripper = batch["obs"][:, 18:26].to(device)  # is_grasped + tcp_pose
         proprio = batch["priv_states"]["articulations"]["panda"][:, 13:31].to(device)
         target_action = batch["action"].to(device)
+
+        obs_seq = torch.cat(
+            [z.view(), gripper, proprio], dim=-1
+        )  # (B, obs_horizon, obs_dim)
 
         # Forward pass
         loss = model.compute_loss(
@@ -871,7 +866,7 @@ def train_bc_epoch(model, loader, optimizer, scheduler, device, noise_std=None):
 
 # TODO: update just like train
 @torch.no_grad()
-def validate_bc(model, loader, device):
+def validate(model, loader, device):
     model.eval()
     total_loss = 0
     for batch in loader:
@@ -893,51 +888,45 @@ def validate_bc(model, loader, device):
     return total_loss / len(loader.dataset)
 
 
-# Beware of data leakage: I should split over episodes, not frames themselves
-# In a simulation, Frame 45 and Frame 46 of the same episode are 99.9% identical
-# If random splitting puts Frame 45 in your Train Set and Frame 46 in your Validation Set, your Validation MSE will drop to near zero
-# Train Set: Episodes 0 to 800 (contains all their frames)
-# Validation Set: Episodes 800 to 1000 (contains all their frames)
+# Split the dataset
 # WARNING: must be the same split of the GNN
-# TODO: Consider now we are working by windows and providing the episode index upfront, so re-conciliate the two things
-
-# Find the splitting index, as done before
 episode_lengths = get_all_episode_lengths(EMBEDDINGS_JS_PATH)
 num_train_episodes = int(SPLIT_RATIO * len(episode_lengths))
-split_idx = sum(episode_lengths[:num_train_episodes])
-print(f"Splitting data for the BC at {split_idx}")
+train_indices = range(num_train_episodes)
+val_indices = range(num_train_episodes, len(episode_lengths))
 
-# Create index ranges for Train and Val
-train_indices = range(0, split_idx)
-val_indices = range(split_idx, len(embeddings_dataset))
-
-# Use Subset to cleanly split the dataset
-bc_train_dataset = torch.utils.data.Subset(embeddings_dataset, train_indices)
-bc_val_dataset = torch.utils.data.Subset(embeddings_dataset, val_indices)
+train_dataset = torch.utils.data.Subset(dataset, train_indices)
+val_dataset = torch.utils.data.Subset(dataset, val_indices)
 
 # Move the data to the dataloaders
-bc_train_loader = TorchDataLoader(
-    bc_train_dataset, batch_size=BC_BATCH_SIZE, shuffle=True
-)
-bc_val_loader = TorchDataLoader(bc_val_dataset, batch_size=BC_BATCH_SIZE)
+train_loader = TorchDataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
+val_loader = TorchDataLoader(val_dataset, batch_size=BATCH_SIZE)
 
 # Prepare the model, optmizer, eventually scheduler etc.
-policy = DiffusionAgent().to(device)
-
-bc_optimizer = torch.optim.AdamW(policy.parameters(), lr=BC_LR)
-bc_scheduler = None
+policy = DiffusionAgent(
+    obs_horizon=OBS_HORIZON,
+    act_horizon=ACT_HORIZON,
+    pred_horizon=PRED_HORIZON,
+    action_dim=ACTION_DIM,
+    obs_dim=PROPRIO_DIM + GRIPPER_DIM,
+    diffusion_step_embed_dim=DIFF_STEP_EMBED_DIM,
+    unet_dims=UNET_DIMS,
+    n_groups=UNET_GROUPS,
+).to(device)
+optimizer = torch.optim.AdamW(policy.parameters(), lr=LR)
+scheduler = CosineAnnealingLR(optimizer, T_max=EPOCHS)
 
 # Check for existence of a checkpoint and eventually load it
-best_bc_val_loss = float("inf")
-if BC_CHECKPOINT_PATH.exists():
+best_val_loss = float("inf")
+if CHECKPOINT_PATH.exists():
     # WARNING: You should also load the seed state if you want to have a perfect reproducibility
-    bc_checkpoint = torch.load(BC_CHECKPOINT_PATH)
-    policy.load_state_dict(bc_checkpoint["model_state_dict"])
-    bc_optimizer.load_state_dict(bc_checkpoint["optimizer_state_dict"])
-    start_epoch = bc_checkpoint.get("epoch", -1) + 1
-    best_bc_val_loss = bc_checkpoint.get("val_loss", float("inf"))
+    checkpoint = torch.load(CHECKPOINT_PATH)
+    policy.load_state_dict(checkpoint["model_state_dict"])
+    optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+    start_epoch = checkpoint.get("epoch", -1) + 1
+    best_val_loss = checkpoint.get("val_loss", float("inf"))
     print(
-        f"Loaded BC checkpoint from epoch {start_epoch} with best val loss: {best_bc_val_loss:.5f}"
+        f"Loaded BC checkpoint from epoch {start_epoch} with best val loss: {best_val_loss:.5f}"
     )
 else:
     # Proceed with training from scratch
@@ -945,48 +934,54 @@ else:
     print("No BC checkpoint found. Starting training from scratch.")
 
 # Train the model for the missing epochs
-for epoch in range(start_epoch, BC_EPOCHS):
-    train_loss = train_bc_epoch(
+for epoch in range(start_epoch, EPOCHS):
+    train_loss = train_epoch(
         policy,
-        bc_train_loader,
-        bc_optimizer,
-        bc_scheduler,
+        train_loader,
+        optimizer,
+        scheduler,
         device,
     )
-    val_loss = validate_bc(policy, bc_val_loader, device)
+    val_loss = validate(policy, val_loader, device)
     print(
         f"BC Epoch {epoch:03d}, Train Action MSE: {train_loss:.5f}, Val Action MSE: {val_loss:.5f}"
     )
 
-    if val_loss < best_bc_val_loss:
-        best_bc_val_loss = val_loss
-        bc_checkpoint = {
+    if val_loss < best_val_loss:
+        best_val_loss = val_loss
+        checkpoint = {
             "model_state_dict": policy.state_dict(),
-            "optimizer_state_dict": bc_optimizer.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
             "epoch": epoch,
             "train_loss": train_loss,
             "val_loss": val_loss,
             "hyperparameters": {
-                "z_dim": GAT_LATENT_CHANNELS,
-                "proprio_dim": BC_PROPRIO_DIM,
-                "action_dim": BC_ACTION_DIM,
-                "hidden_dim": BC_HIDDEN_DIM,
-                "batch_size": BC_BATCH_SIZE,
-                "lr": BC_LR,
-                "epochs": BC_EPOCHS,
+                "obs_horizon": OBS_HORIZON,
+                "act_horizon": ACT_HORIZON,
+                "pred_horizon": PRED_HORIZON,
+                "action_dim": ACTION_DIM,
+                "obs_dim": PROPRIO_DIM + GRIPPER_DIM,
+                "diffusion_step_embed_dim": DIFF_STEP_EMBED_DIM,
+                "unet_dims": UNET_DIMS,
+                "n_groups": UNET_GROUPS,
+                "num_diffusion_iters": NUM_DIFFUSION_ITERS,
+                "lr": LR,
+                "batch_size": BATCH_SIZE,
+                "epochs": EPOCHS,
+                "split_ratio": SPLIT_RATIO,
             },
         }
-        torch.save(bc_checkpoint, BC_CHECKPOINT_PATH)
-        print(f"\t>New best BC model saved with Val MSE: {val_loss:.5f}")
+        torch.save(checkpoint, CHECKPOINT_PATH)
+        print(f"\t>New best diffusion model saved with Val MSE: {val_loss:.5f}")
 
 # Load the best model weights for later phases
-if BC_CHECKPOINT_PATH.exists():
-    print(f"Loading best BC model from {BC_CHECKPOINT_PATH}")
-    bc_checkpoint = torch.load(BC_CHECKPOINT_PATH)
-    policy.load_state_dict(bc_checkpoint["model_state_dict"])
+if CHECKPOINT_PATH.exists():
+    print(f"Loading best diffusion model from {CHECKPOINT_PATH}")
+    checkpoint = torch.load(CHECKPOINT_PATH)
+    policy.load_state_dict(checkpoint["model_state_dict"])
 
 
-def evaluate_graph_policy(gae_model, bc_model, num_episodes=100):
+def evaluate_graph_policy(gae_model, diff_model, num_episodes=100):
     # Reference:
     #   https://gymnasium.farama.org/api/env/
     #   https://gymnasium.farama.org/api/registry/#gymnasium.make
@@ -1001,7 +996,7 @@ def evaluate_graph_policy(gae_model, bc_model, num_episodes=100):
     )
 
     gae_model.eval()
-    bc_model.eval()
+    diff_model.eval()
     successes = 0
 
     print(f"Evaluating Graph Policy over {num_episodes} episodes...")
@@ -1033,7 +1028,7 @@ def evaluate_graph_policy(gae_model, bc_model, num_episodes=100):
                     .to(device)
                 )
 
-                action = bc_model(z, gripper, proprio)
+                action = diff_model(z, gripper, proprio)
                 # Could rather use tanh as last activation function in the model to enforce this
                 action = torch.clamp(action, -1.0, 1.0)
 

@@ -7,6 +7,7 @@
 *   http://maniskill.readthedocs.io/en/latest/user_guide/learning_from_demos/index.html
 """
 
+import random
 import argparse
 from typing import Union
 from pathlib import Path
@@ -77,7 +78,7 @@ def seed_everything(seed: int) -> None:
     Args:
         seed (int): The desired seed.
     """
-    # random.seed(seed)
+    random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
@@ -904,9 +905,8 @@ def validate(model, loader, device):
         obs_seq = torch.cat([z, gripper, proprio], dim=-1)
 
         # Calculate validation loss
-        # NOTE: We use `compute_loss` here instead of full denoising.
-        # Running 100 diffusion steps for every validation batch would take hours.
-        # `compute_loss` cleanly tracks if the UNet is overfitting the noise predictions
+        # we use compute_loss here instead of full denoising
+        # running 100 diffusion steps for every validation batch would take hours
         loss = model.compute_loss(
             obs_seq=obs_seq,
             action_seq=target_action,
@@ -918,8 +918,7 @@ def validate(model, loader, device):
 
 
 # Split the dataset
-# WARNING: must be the same split of the GNN
-# WARNING: must split by trajectory, not by window index
+# NOTE: must be the same split of the GNN
 episode_lengths = get_all_episode_lengths(EMBEDDINGS_JS_PATH)
 num_train_episodes = int(SPLIT_RATIO * len(episode_lengths))
 print(
@@ -975,13 +974,21 @@ ema = EMAModel(
 # Check for existence of a checkpoint and eventually load it
 best_val_loss = float("inf")
 if CHECKPOINT_PATH.exists():
-    # WARNING: You should also load the seed state if you want to have a perfect reproducibility
     checkpoint = torch.load(CHECKPOINT_PATH)
     policy.load_state_dict(checkpoint["model_state_dict"])
     optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
 
     if "ema_state_dict" in checkpoint:
         ema.load_state_dict(checkpoint["ema_state_dict"])
+
+    if "torch_rng_state" in checkpoint:
+        torch.set_rng_state(checkpoint["torch_rng_state"])
+    if "cuda_rng_state" in checkpoint:
+        torch.cuda.set_rng_state_all(checkpoint["cuda_rng_state"])
+    if "numpy_rng_state" in checkpoint:
+        np.random.set_state(checkpoint["numpy_rng_state"])
+    if "python_rng_state" in checkpoint:
+        random.setstate(checkpoint["python_rng_state"])
 
     start_epoch = checkpoint.get("epoch", -1) + 1
     best_val_loss = checkpoint.get("val_loss", float("inf"))
@@ -1017,6 +1024,10 @@ for epoch in range(start_epoch, EPOCHS):
             "epoch": epoch,
             "train_loss": train_loss,
             "val_loss": val_loss,
+            "torch_rng_state": torch.get_rng_state(),
+            "cuda_rng_state": torch.cuda.get_rng_state_all(),
+            "numpy_rng_state": np.random.get_state(),
+            "python_rng_state": random.getstate(),
             "hyperparameters": {
                 "obs_horizon": OBS_HORIZON,
                 "act_horizon": ACT_HORIZON,

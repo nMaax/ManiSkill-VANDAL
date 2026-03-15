@@ -13,6 +13,7 @@ import argparse
 from typing import Union
 from pathlib import Path
 from tqdm import tqdm
+import random
 
 import numpy as np
 import h5py
@@ -29,28 +30,6 @@ from torch_geometric.loader import DataLoader as GeoDataLoader
 from mani_skill.utils.io_utils import load_json
 from mani_skill.utils import common
 
-
-def seed_everything(seed: int) -> None:
-    r"""Sets the seed for generating random numbers in :pytorch:`PyTorch`,
-    :obj:`numpy` and :python:`Python`.
-
-    Args:
-        seed (int): The desired seed.
-    """
-    # random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-
-    # Seeding
-
-
-seed_everything(42)
-
-# CUDA avaliability
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-# NOTE: Should also manage physix_cuda but there were some issues with arrays/tensors
-print(f"Working on {device}")
 
 # For proper path generation
 home = Path.home()
@@ -110,9 +89,21 @@ def print_dict_tree(data, indent=""):
         else:
             print(f"{indent}{branch}{key}: {type(value).__name__}")
 
-    # loads h5 data into memory for faster access
+
+def seed_everything(seed: int) -> None:
+    r"""Sets the seed for generating random numbers in :pytorch:`PyTorch`,
+    :obj:`numpy` and :python:`Python`.
+
+    Args:
+        seed (int): The desired seed.
+    """
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
 
 
+# loads h5 data into memory for faster ACCESS
 def load_h5_data(data):
     out = dict()
     for k in data.keys():
@@ -567,6 +558,13 @@ def check_temporal_consistency(start_frame_idx, episode_length):
 
 
 if __name__ == "__main__":
+    # seeding
+    seed_everything(42)
+    # CUDA avaliability
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # NOTE: Should also manage physix_cuda but there were some issues with arrays/tensors
+    print(f"Working on {device}")
+
     # Argument Parsing
     parser = argparse.ArgumentParser(
         description="ManiSkill GAT-BC Training and Benchmarking"

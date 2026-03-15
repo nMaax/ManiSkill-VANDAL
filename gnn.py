@@ -70,6 +70,8 @@ JS_PATH = DS_PATH / "trajectory.json"
 REPLAYED_JS_PATH = DS_PATH / "trajectory.state.pd_ee_delta_pos.physx_cpu.json"
 EMBEDDINGS_JS_PATH = REPLAYED_JS_PATH.with_suffix(".embeddings.json")
 
+# Importable from outside as default
+GAT_CHECKPOINT_PATH = script_location / "gatautoencoder_best.pth"
 
 # Graph parameters
 NUM_NODES = 5  # Cube, Goal, Table, Robot Base, Hand

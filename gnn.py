@@ -623,13 +623,11 @@ if __name__ == "__main__":
     num_nodes = data_list[0].x.shape[0]
     in_channels = data_list[0].x.shape[1]
 
-    assert (
-        NUM_NODES == num_nodes,
-        "Expected number of nodes does not match the one in the graph data",
+    assert NUM_NODES == num_nodes, (
+        "Expected number of nodes does not match the one in the graph data"
     )
-    assert (
-        IN_CHANNELS == in_channels,
-        "Expected input feature dimension does not match the one in the graph data",
+    assert IN_CHANNELS == in_channels, (
+        "Expected input feature dimension does not match the one in the graph data"
     )
 
     # NOTE: another approach would be to directly train the whole BC + GAT model all togheter

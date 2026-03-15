@@ -154,7 +154,6 @@ OBS_HORIZON = 2
 PRED_HORIZON = 16
 ACT_HORIZON = 8
 NUM_DIFFUSION_ITERS = 100
-BC_BATCH_SIZE
 
 # %% *** Phase 1: Scene Graph Engineering ***
 
@@ -173,174 +172,157 @@ def load_h5_data(data):
 
 
 class ManiSkillTrajectoryDataset(Dataset):
-    """
-    A general torch Dataset you can drop in and use immediately with just about any trajectory .h5 data generated from ManiSkill.
-    This class simply is a simple starter code to load trajectory data easily, but does not do any data transformation or anything
-    advanced. We recommend you to copy this code directly and modify it for more advanced use cases
-
-    Args:
-        dataset_file (str): path to the .h5 file containing the data you want to load
-        load_count (int): the number of trajectories from the dataset to load into memory. If -1, will load all into memory
-        success_only (bool): whether to skip trajectories that are not successful in the end. Default is false
-        device: The location to save data to. If None will store as numpy (the default), otherwise will move data to that device
-
-    Reference: https://maniskill.readthedocs.io/en/latest/user_guide/datasets/demos.html#pytorch
-    """
-
     def __init__(
-        self, dataset_file: str, load_count=-1, success_only: bool = False, device=None
+        self,
+        dataset_file: str,
+        obs_horizon: int,
+        pred_horizon: int,
+        load_count=-1,
+        success_only: bool = False,
+        device=None,
     ) -> None:
         self.dataset_file = dataset_file
         self.device = device
+        self.obs_horizon = obs_horizon
+        self.pred_horizon = pred_horizon
+
         self.data = h5py.File(dataset_file, "r")
-        json_path = dataset_file.with_suffix(".json")
+        json_path = Path(dataset_file).with_suffix(".json")
         self.json_data = load_json(json_path)
         self.episodes = self.json_data["episodes"]
-        self.env_info = self.json_data["env_info"]
-        self.env_id = self.env_info["env_id"]
-        self.env_kwargs = self.env_info["env_kwargs"]
 
-        self.obs = None
-        self.actions = []
-        self.terminated = []
-        self.truncated = []
-        self.success, self.fail, self.rewards = None, None, None
+        # Instead of flattening, we keep a LIST of episodes.
+        # Each element is a dict containing the full episode's obs, actions, and priv_states.
+        self.trajectories = []
+
         if load_count == -1:
             load_count = len(self.episodes)
+
+        print(f"Loading {load_count} episodes into memory for sequence extraction...")
         for eps_id in tqdm(range(load_count)):
             eps = self.episodes[eps_id]
-            if success_only:
-                assert "success" in eps, (
-                    "episodes in this dataset do not have the success attribute, cannot load dataset with success_only=True"
-                )
-                if not eps["success"]:
-                    continue
-            trajesctory = self.data[f"traj_{eps['episode_id']}"]
-            trajectory = load_h5_data(trajesctory)
+            if success_only and not eps.get("success", False):
+                continue
+
+            traj_data = self.data[f"traj_{eps['episode_id']}"]
+            trajectory = load_h5_data(traj_data)
             eps_len = len(trajectory["actions"])
 
-            # exclude the final observation as most learning workflows do not use it
+            # Extract the raw dict arrays for this specific episode
             obs = common.index_dict_array(trajectory["obs"], slice(eps_len))
-            if eps_id == 0:
-                self.obs = obs
-            else:
-                self.obs = common.append_dict_array(self.obs, obs)
-
             priv_states = common.index_dict_array(
                 trajectory["env_states"], slice(eps_len)
             )
-            if eps_id == 0:
-                self.priv_states = priv_states
-            else:
-                self.priv_states = common.append_dict_array(
-                    self.priv_states, priv_states
-                )
+            actions = trajectory["actions"]
 
-            self.actions.append(trajectory["actions"])
-            self.terminated.append(trajectory["terminated"])
-            self.truncated.append(trajectory["truncated"])
+            # Store them securely
+            self.trajectories.append(
+                {"obs": obs, "priv_states": priv_states, "actions": actions}
+            )
 
-            # handle data that might optionally be in the trajectory
-            if "rewards" in trajectory:
-                if self.rewards is None:
-                    self.rewards = [trajectory["rewards"]]
-                else:
-                    self.rewards.append(trajectory["rewards"])
-            if "success" in trajectory:
-                if self.success is None:
-                    self.success = [trajectory["success"]]
-                else:
-                    self.success.append(trajectory["success"])
-            if "fail" in trajectory:
-                if self.fail is None:
-                    self.fail = [trajectory["fail"]]
-                else:
-                    self.fail.append(trajectory["fail"])
+        # Pre-compute sliding windows
+        # We calculate every valid (traj_index, start_frame, end_frame, full_traj_lenght) tuple
+        # |o|o|                             observations: 2 (obs_horizon)
+        # | |a|a|a|a|a|a|a|a|               actions executed: 8 (actions_horizon)
+        # |p|p|p|p|p|p|p|p|p|p|p|p|p|p|p|p| actions predicted: 16 (pred_horizon)
+        #    ^
+        # You are here! (You only have this one)
+        # So we need 1 frames before (and 14 after), indeed, 1 + 1 + 14 = 16
+        self.slices = []
+        pad_before = (
+            self.obs_horizon - 1
+        )  # Number of input frames we need before the current frame (i.e., the -1 in the formula) to fill the observation horizon
 
-        self.actions = np.vstack(self.actions)
-        self.terminated = np.concatenate(self.terminated)
-        self.truncated = np.concatenate(self.truncated)
+        # We need the end to stretch far enough to get all target actions
+        # but the actual actions we take are bounded by the prediction horizon
+        for traj_idx, traj in enumerate(self.trajectories):
+            L = len(traj["actions"])
 
-        if self.rewards is not None:
-            self.rewards = np.concatenate(self.rewards)
-        if self.success is not None:
-            self.success = np.concatenate(self.success)
-        if self.fail is not None:
-            self.fail = np.concatenate(self.fail)
+            # |o|o|                             observations: 2 (obs_horizon)
+            # | |a|a|a|a|a|a|a|a|               actions executed: 8 (actions_horizon)
+            # |p|p|p|p|p|p|p|p|p|p|p|p|p|p|p|p| actions predicted: 16 (pred_horizon)
+            #    ^
+            # You are here! (You only have this one)
+            # So we need 14 frames after
+            pad_after = self.pred_horizon - self.obs_horizon
 
-        def remove_np_uint16(x: Union[np.ndarray, dict]):
-            if isinstance(x, dict):
-                for k in x.keys():
-                    x[k] = remove_np_uint16(x[k])
-                return x
-            else:
-                if x.dtype == np.uint16:
-                    return x.astype(np.int32)
-                return x
+            # Generate windows that slide across the entire trajectory (e.g. for traj_0: from -1 to 74-16+14=72)
+            for start in range(-pad_before, L - self.pred_horizon + pad_after):
+                end = start + self.pred_horizon
+                self.slices.append((traj_idx, start, end, L))
 
-        # uint16 dtype is used to conserve disk space and memory
-        # you can optimize this dataset code to keep it as uint16 and process that
-        # dtype of data yourself. for simplicity we simply cast to a int32 so
-        # it can automatically be converted to torch tensors without complaint
-        self.obs = remove_np_uint16(self.obs)
-
-        if device is not None:
-            self.actions = common.to_tensor(self.actions, device=device)
-            self.obs = common.to_tensor(self.obs, device=device)
-            self.terminated = common.to_tensor(self.terminated, device=device)
-            self.truncated = common.to_tensor(self.truncated, device=device)
-            if self.rewards is not None:
-                self.rewards = common.to_tensor(self.rewards, device=device)
-            if self.success is not None:
-                self.success = common.to_tensor(self.success, device=device)
-            if self.fail is not None:
-                self.fail = common.to_tensor(self.fail, device=device)
-
-    def _padding(self, seq, horizon, pad_value=0):
-        # The dataset must pad the beginning of trajectories (so Frame 0 has a "previous" frame to look at)
-        # and pad the end (so the robot knows to "stay still" after the task is done)."""
-        seq = np.array(seq)
-        pad_before = max(0, horizon - len(seq))
-        pad_after = max(0, horizon - len(seq) - pad_before)
-        pad_width = ((pad_before, pad_after),) + tuple(
-            (0, 0) for _ in range(seq.ndim - 1)
+        print(
+            f"Dataset initialized: {len(self.slices)} valid temporal windows extracted."
         )
-        return np.pad(seq, pad_width, mode="constant", constant_values=pad_value)
+
+    def _slice_and_pad(self, data, start, end, L):
+        """
+        Recursively slices and pads dictionaries or numpy arrays.
+        - If start < 0, it repeats the first frame.
+        - If end > L, it repeats the last frame.
+        """
+        if isinstance(data, dict):
+            # If it's a nested dictionary (like priv_states), recurse!
+            return {k: self._slice_and_pad(v, start, end, L) for k, v in data.items()}
+
+        # Base case: It's a numpy array
+        pad_before = max(0, -start)
+        pad_after = max(0, end - L)
+
+        valid_start = max(0, start)
+        valid_end = min(L, end)
+
+        # Grab the valid segment
+        seq = data[valid_start:valid_end]
+
+        # Pad by repeating the first frame
+        if pad_before > 0:
+            padding = np.repeat(seq[0:1], pad_before, axis=0)
+            seq = np.concatenate([padding, seq], axis=0)
+
+        # Pad by repeating the last frame
+        if pad_after > 0:
+            padding = np.repeat(seq[-1:], pad_after, axis=0)
+            seq = np.concatenate([seq, padding], axis=0)
+
+        return seq
 
     def __len__(self):
-        return len(self.actions)
+        # The length is now the number of windows, not the number of frames
+        return len(self.slices)
 
     def __getitem__(self, idx):
-        # Returns obs_seq of shape [OBS_HORIZON, INPUT_STATE(Z, PROPRIO, GRIPPER):66] and action_seq of shape [PRED_HORIZON, ACTION_DIM:4]
-        obs_seq = self._padding(self.obs[idx], self.OBS_HORIZON)
-        action_seq = self._padding(self.actions[idx], self.PRED_HORIZON)
-        # TODO: probably need to pad priv_states as well
-        obs_seq = common.to_tensor(obs_seq, device=self.device)
-        action_seq = common.to_tensor(action_seq, device=self.device)
+        # Identify which window we are pulling
+        traj_idx, start, end, L = self.slices[idx]
+        traj = self.trajectories[traj_idx]
 
-        priv_states = common.index_dict_array(self.priv_states, idx, inplace=False)
-
-        res = dict(
-            obs_seq=obs_seq,
-            action_seq=action_seq,
-            priv_states=priv_states,
-            terminated=self.terminated[idx],
-            truncated=self.truncated[idx],
+        # Slice and pad observations and priv_states (need obs_horizon length only)
+        obs_seq = self._slice_and_pad(traj["obs"], start, start + self.obs_horizon, L)
+        priv_states_seq = self._slice_and_pad(
+            traj["priv_states"], start, start + self.obs_horizon, L
         )
-        if self.rewards is not None:
-            res.update(reward=self.rewards[idx])
-        if self.success is not None:
-            res.update(success=self.success[idx])
-        if self.fail is not None:
-            res.update(fail=self.fail[idx])
-        return res
+
+        # Slice and pad actions (needs the full pred_horizon length)
+        action_seq = self._slice_and_pad(traj["actions"], start, end, L)
+
+        # Convert to tensors (common.to_tensor recursively handles dictionaries natively)
+        if self.device is not None:
+            obs_seq = common.to_tensor(obs_seq, device=self.device)
+            priv_states_seq = common.to_tensor(priv_states_seq, device=self.device)
+            action_seq = common.to_tensor(action_seq, device=self.device)
+
+        return {
+            "obs_seq": obs_seq,
+            "priv_states_seq": priv_states_seq,
+            "action_seq": action_seq,
+        }
 
 
-dataset = ManiSkillTrajectoryDataset(REPLAYED_H5_PATH)
+dataset = ManiSkillTrajectoryDataset(REPLAYED_H5_PATH, OBS_HORIZON, PRED_HORIZON)
 print(
     f"""Dataset lenght: {
         len(dataset)
-    }, i.e., number of episodes/trajectories * frames per episode (-> (priv_state, observation, action) 3-ple for training later"""
+    }, i.e., number of windows extracted (-> (traj where the windows was extracted, start frame in such trajectory, end fram in such trajectory, full lenght of the trajectory) 4-ple for training later"""
 )
 
 
@@ -1421,7 +1403,6 @@ bc_train_loader = TorchDataLoader(
 bc_val_loader = TorchDataLoader(bc_val_dataset, batch_size=BC_BATCH_SIZE)
 
 # Prepare the model, optmizer, eventually scheduler etc.
-# TODO: Substitute with DiffusionAgent
 policy = DiffusionAgent().to(device)
 
 bc_optimizer = torch.optim.AdamW(policy.parameters(), lr=BC_LR)

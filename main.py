@@ -1233,24 +1233,34 @@ class ConditionalUnet1D(nn.Module):
 
 
 class DiffusionAgent(nn.Module):
-    def __init__(self, args):
-        # TODO: make the args explicit
+    def __init__(
+        self,
+        obs_horizon,
+        act_horizon,
+        pred_horizon,
+        action_dim,
+        obs_dim,
+        diffusion_step_embed_dim,
+        unet_dims,
+        n_groups,
+        num_diffusion_iters=100,
+    ):
 
         super().__init__()
-        self.obs_horizon = args.obs_horizon
-        self.act_horizon = args.act_horizon
-        self.pred_horizon = args.pred_horizon
-        self.act_dim = args.action_dim
-        self.obs_dim = args.obs_dim
+        self.obs_horizon = obs_horizon
+        self.act_horizon = act_horizon
+        self.pred_horizon = pred_horizon
+        self.act_dim = action_dim
+        self.obs_dim = obs_dim
 
         self.noise_pred_net = ConditionalUnet1D(
             input_dim=self.act_dim,  # act_horizon is not used (U-Net doesn't care)
             global_cond_dim=self.obs_horizon * self.obs_dim,
-            diffusion_step_embed_dim=args.diffusion_step_embed_dim,
-            down_dims=args.unet_dims,
-            n_groups=args.n_groups,
+            diffusion_step_embed_dim=diffusion_step_embed_dim,
+            down_dims=unet_dims,
+            n_groups=n_groups,
         )
-        self.num_diffusion_iters = 100
+        self.num_diffusion_iters = num_diffusion_iters
         self.noise_scheduler = DDPMScheduler(
             num_train_timesteps=self.num_diffusion_iters,
             beta_schedule="squaredcos_cap_v2",  # has big impact on performance, try not to change

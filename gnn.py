@@ -29,22 +29,6 @@ from torch_geometric.loader import DataLoader as GeoDataLoader
 from mani_skill.utils.io_utils import load_json
 from mani_skill.utils import common
 
-# Argument Parsing
-parser = argparse.ArgumentParser(
-    description="ManiSkill GAT-BC Training and Benchmarking"
-)
-parser.add_argument(
-    "--gat-epochs", type=int, default=25, help="Number of GAT epochs (default: 10)"
-)
-parser.add_argument(
-    "--gat-checkpoint",
-    type=str,
-    default="gatautoencoder_best.pth",
-    help="GAT checkpoint filename (default: gatautoencoder_best.pth)",
-)
-
-args = parser.parse_args()
-
 
 def seed_everything(seed: int) -> None:
     r"""Sets the seed for generating random numbers in :pytorch:`PyTorch`,
@@ -86,17 +70,12 @@ JS_PATH = DS_PATH / "trajectory.json"
 REPLAYED_JS_PATH = DS_PATH / "trajectory.state.pd_ee_delta_pos.physx_cpu.json"
 EMBEDDINGS_JS_PATH = REPLAYED_JS_PATH.with_suffix(".embeddings.json")
 
-# These are to load/save checkpoints
-GAT_CHECKPOINT_PATH = script_location / args.gat_checkpoint
 
 # Graph parameters
 NUM_NODES = 5  # Cube, Goal, Table, Robot Base, Hand
 IN_CHANNELS = 6  # XYZ + Bounding Box Size
 
 # Hyperparameters
-SPLIT_RATIO = 0.8
-GAT_EPOCHS = args.gat_epochs
-GAT_LR = 1e-4
 GAT_BATCH_SIZE = 64
 GAT_HIDDEN_CHANNELS = 128
 GAT_LATENT_CHANNELS = 4
@@ -586,6 +565,27 @@ def check_temporal_consistency(start_frame_idx, episode_length):
 
 
 if __name__ == "__main__":
+    # Argument Parsing
+    parser = argparse.ArgumentParser(
+        description="ManiSkill GAT-BC Training and Benchmarking"
+    )
+    parser.add_argument(
+        "--gat-epochs", type=int, default=25, help="Number of GAT epochs (default: 10)"
+    )
+    parser.add_argument(
+        "--gat-checkpoint",
+        type=str,
+        default="gatautoencoder_best.pth",
+        help="GAT checkpoint filename (default: gatautoencoder_best.pth)",
+    )
+
+    args = parser.parse_args()
+
+    GAT_EPOCHS = args.gat_epochs
+    GAT_CHECKPOINT_PATH = script_location / args.gat_checkpoint
+    SPLIT_RATIO = 0.8
+    GAT_LR = 1e-4
+
     dataset = ManiSkillTrajectoryDataset(REPLAYED_H5_PATH)
     print_dict_tree(dataset[0])
     print(build_graph(dataset, 0))

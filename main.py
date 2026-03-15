@@ -65,6 +65,12 @@ parser.add_argument(
     help="Enable rendering",
 )
 parser.add_argument(
+    "--train",
+    action=argparse.BooleanOptionalAction,
+    default=True,
+    help="Enable training",
+)
+parser.add_argument(
     "--checkpoint",
     type=str,
     default="diff_unet_policy_best.pth",
@@ -119,6 +125,7 @@ CHECKPOINT_PATH = script_location / args.checkpoint
 
 # Flags for run later
 RENDER = args.render
+TRAIN = args.train
 
 # Generic Hyperparameters
 SPLIT_RATIO = 0.8
@@ -1004,57 +1011,63 @@ else:
     print("No Diffusion checkpoint found. Starting training from scratch.")
 
 # Train the model for the missing epochs
-for epoch in range(start_epoch, EPOCHS):
-    train_loss = train_epoch(
-        policy,
-        train_loader,
-        optimizer,
-        lr_scheduler,
-        ema,
-        device,
-    )
-    val_loss = validate(policy, val_loader, device)
+if TRAIN:
+    for epoch in range(start_epoch, EPOCHS):
+        train_loss = train_epoch(
+            policy,
+            train_loader,
+            optimizer,
+            lr_scheduler,
+            ema,
+            device,
+        )
+        val_loss = validate(policy, val_loader, device)
+        print(
+            f"Diffusion epoch {epoch:03d}, Train Action MSE: {train_loss:.5f}, Val Action MSE: {val_loss:.5f}"
+        )
+
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            checkpoint = {
+                "model_state_dict": policy.state_dict(),
+                "ema_state_dict": ema.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
+                "epoch": epoch,
+                "train_loss": train_loss,
+                "val_loss": val_loss,
+                "torch_rng_state": torch.get_rng_state(),
+                "cuda_rng_state": torch.cuda.get_rng_state_all(),
+                "numpy_rng_state": np.random.get_state(),
+                "python_rng_state": random.getstate(),
+                "hyperparameters": {
+                    "obs_horizon": OBS_HORIZON,
+                    "act_horizon": ACT_HORIZON,
+                    "pred_horizon": PRED_HORIZON,
+                    "action_dim": ACTION_DIM,
+                    "obs_dim": Z_DIM + PROPRIO_DIM + GRIPPER_DIM,
+                    "diffusion_step_embed_dim": DIFF_STEP_EMBED_DIM,
+                    "unet_dims": UNET_DIMS,
+                    "n_groups": UNET_GROUPS,
+                    "num_diffusion_iters": NUM_DIFFUSION_ITERS,
+                    "lr": LR,
+                    "batch_size": BATCH_SIZE,
+                    "epochs": EPOCHS,
+                    "split_ratio": SPLIT_RATIO,
+                },
+            }
+            torch.save(checkpoint, CHECKPOINT_PATH)
+            print(f"\t>New best diffusion model saved with Val MSE: {val_loss:.5f}")
+
+            # Load the best model weights
+            if CHECKPOINT_PATH.exists():
+                print(f"Loading best diffusion model from {CHECKPOINT_PATH}")
+                checkpoint = torch.load(CHECKPOINT_PATH)
+                policy.load_state_dict(checkpoint["model_state_dict"])
+
+else:
     print(
-        f"Diffusion epoch {epoch:03d}, Train Action MSE: {train_loss:.5f}, Val Action MSE: {val_loss:.5f}"
+        "Training skipped as per configuration. Proceeding to evaluation with the best available model."
     )
-
-    if val_loss < best_val_loss:
-        best_val_loss = val_loss
-        checkpoint = {
-            "model_state_dict": policy.state_dict(),
-            "ema_state_dict": ema.state_dict(),
-            "optimizer_state_dict": optimizer.state_dict(),
-            "epoch": epoch,
-            "train_loss": train_loss,
-            "val_loss": val_loss,
-            "torch_rng_state": torch.get_rng_state(),
-            "cuda_rng_state": torch.cuda.get_rng_state_all(),
-            "numpy_rng_state": np.random.get_state(),
-            "python_rng_state": random.getstate(),
-            "hyperparameters": {
-                "obs_horizon": OBS_HORIZON,
-                "act_horizon": ACT_HORIZON,
-                "pred_horizon": PRED_HORIZON,
-                "action_dim": ACTION_DIM,
-                "obs_dim": Z_DIM + PROPRIO_DIM + GRIPPER_DIM,
-                "diffusion_step_embed_dim": DIFF_STEP_EMBED_DIM,
-                "unet_dims": UNET_DIMS,
-                "n_groups": UNET_GROUPS,
-                "num_diffusion_iters": NUM_DIFFUSION_ITERS,
-                "lr": LR,
-                "batch_size": BATCH_SIZE,
-                "epochs": EPOCHS,
-                "split_ratio": SPLIT_RATIO,
-            },
-        }
-        torch.save(checkpoint, CHECKPOINT_PATH)
-        print(f"\t>New best diffusion model saved with Val MSE: {val_loss:.5f}")
-
-# Load the best model weights
-if CHECKPOINT_PATH.exists():
-    print(f"Loading best diffusion model from {CHECKPOINT_PATH}")
-    checkpoint = torch.load(CHECKPOINT_PATH)
-    policy.load_state_dict(checkpoint["model_state_dict"])
 
 
 def evaluate_graph_policy(gae_model, diff_model, num_episodes=100):

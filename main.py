@@ -14,6 +14,7 @@ from typing import Union
 from pathlib import Path
 from datetime import datetime
 from tqdm import tqdm
+import math
 
 import numpy as np
 import h5py
@@ -24,13 +25,16 @@ import torch.nn.functional as F
 from torch.utils.data import Dataset
 from torch.utils.data import DataLoader as TorchDataLoader
 
-from torch_geometric.nn import GATConv, global_mean_pool
+from torch_geometric.nn import GATConv
 from torch_geometric.data import Data
 from torch_geometric.loader import DataLoader as GeoDataLoader
 
 from mani_skill.utils.io_utils import load_json
 from mani_skill.utils import common
 import gymnasium as gym
+
+from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
+
 
 # Argument Parsing
 parser = argparse.ArgumentParser(
@@ -144,6 +148,13 @@ BC_ACTION_DIM = 4
 BC_PROPRIO_DIM = 18
 BC_GRIPPER_DIM = 8
 BC_HIDDEN_DIM = 256
+
+# Diffusion Hyperparameters
+OBS_HORIZON = 2
+PRED_HORIZON = 16
+ACT_HORIZON = 8
+NUM_DIFFUSION_ITERS = 100
+BC_BATCH_SIZE
 
 # %% *** Phase 1: Scene Graph Engineering ***
 
@@ -285,19 +296,34 @@ class ManiSkillTrajectoryDataset(Dataset):
             if self.fail is not None:
                 self.fail = common.to_tensor(self.fail, device=device)
 
+    def _padding(self, seq, horizon, pad_value=0):
+        # The dataset must pad the beginning of trajectories (so Frame 0 has a "previous" frame to look at)
+        # and pad the end (so the robot knows to "stay still" after the task is done)."""
+        seq = np.array(seq)
+        pad_before = max(0, horizon - len(seq))
+        pad_after = max(0, horizon - len(seq) - pad_before)
+        pad_width = ((pad_before, pad_after),) + tuple(
+            (0, 0) for _ in range(seq.ndim - 1)
+        )
+        return np.pad(seq, pad_width, mode="constant", constant_values=pad_value)
+
     def __len__(self):
         return len(self.actions)
 
     def __getitem__(self, idx):
-        action = common.to_tensor(self.actions[idx], device=self.device)
-        obs = common.index_dict_array(self.obs, idx, inplace=False)
+        # Returns obs_seq of shape [OBS_HORIZON, INPUT_STATE(Z, PROPRIO, GRIPPER):66] and action_seq of shape [PRED_HORIZON, ACTION_DIM:4]
+        obs_seq = self._padding(self.obs[idx], self.OBS_HORIZON)
+        action_seq = self._padding(self.actions[idx], self.PRED_HORIZON)
+        # TODO: probably need to pad priv_states as well
+        obs_seq = common.to_tensor(obs_seq, device=self.device)
+        action_seq = common.to_tensor(action_seq, device=self.device)
+
         priv_states = common.index_dict_array(self.priv_states, idx, inplace=False)
 
         res = dict(
-            action=action,
+            obs_seq=obs_seq,
+            action_seq=action_seq,
             priv_states=priv_states,
-            obs=obs,
-            # action=action,
             terminated=self.terminated[idx],
             truncated=self.truncated[idx],
         )
@@ -929,33 +955,374 @@ print("\n\n--- Phase 4: Policy Training & Evaluation ---")
 #       examples/baselines/diffusion_policy
 
 
-class MLPGraphStateBCPolicy(nn.Module):
-    """A lightweight MLP to predict actions sequentially"""
-
-    def __init__(self, z_dim, proprio_dim, gripper_dim, action_dim, hidden_dim):
+class SinusoidalPosEmb(nn.Module):
+    def __init__(self, dim):
         super().__init__()
-        self.z_dim = z_dim
-        self.proprio_dim = proprio_dim
-        self.gripper_dim = gripper_dim
-        self.action_dim = action_dim
-        self.hidden_dim = hidden_dim
+        self.dim = dim
 
-        self.mlp = nn.Sequential(
-            nn.Linear(z_dim + proprio_dim + gripper_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, action_dim),
+    def forward(self, x):
+        device = x.device
+        half_dim = self.dim // 2
+        emb = math.log(10000) / (half_dim - 1)
+        emb = torch.exp(torch.arange(half_dim, device=device) * -emb)
+        emb = x[:, None] * emb[None, :]
+        emb = torch.cat((emb.sin(), emb.cos()), dim=-1)
+        return emb
+
+
+class Downsample1d(nn.Module):
+    def __init__(self, dim):
+        super().__init__()
+        self.conv = nn.Conv1d(dim, dim, 3, 2, 1)
+
+    def forward(self, x):
+        return self.conv(x)
+
+
+class Upsample1d(nn.Module):
+    def __init__(self, dim):
+        super().__init__()
+        self.conv = nn.ConvTranspose1d(dim, dim, 4, 2, 1)
+
+    def forward(self, x):
+        return self.conv(x)
+
+
+class Conv1dBlock(nn.Module):
+    """
+    Conv1d --> GroupNorm --> Mish
+    """
+
+    def __init__(self, inp_channels, out_channels, kernel_size, n_groups=8):
+        super().__init__()
+
+        self.block = nn.Sequential(
+            nn.Conv1d(
+                inp_channels, out_channels, kernel_size, padding=kernel_size // 2
+            ),
+            nn.GroupNorm(n_groups, out_channels),
+            nn.Mish(),
         )
 
-    def forward(self, z, gripper, proprio):
+    def forward(self, x):
+        return self.block(x)
 
-        # Ensure correct z dimensionsonality
-        z = z.view(-1, self.z_dim)
 
-        # Combine the GAT latent embeddings (z) with gripper and proprioception
-        x = torch.cat([z, gripper, proprio], dim=-1)
-        return self.mlp(x)
+class ConditionalResidualBlock1D(nn.Module):
+    def __init__(self, in_channels, out_channels, cond_dim, kernel_size=3, n_groups=8):
+        super().__init__()
+
+        self.blocks = nn.ModuleList(
+            [
+                Conv1dBlock(in_channels, out_channels, kernel_size, n_groups=n_groups),
+                Conv1dBlock(out_channels, out_channels, kernel_size, n_groups=n_groups),
+            ]
+        )
+
+        # FiLM modulation https://arxiv.org/abs/1709.07871
+        # predicts per-channel scale and bias
+        cond_channels = out_channels * 2
+        self.out_channels = out_channels
+        self.cond_encoder = nn.Sequential(
+            nn.Mish(), nn.Linear(cond_dim, cond_channels), nn.Unflatten(-1, (-1, 1))
+        )
+
+        # make sure dimensions compatible
+        self.residual_conv = (
+            nn.Conv1d(in_channels, out_channels, 1)
+            if in_channels != out_channels
+            else nn.Identity()
+        )
+
+    def forward(self, x, cond):
+        """
+        x : [ batch_size x in_channels x horizon ]
+        cond : [ batch_size x cond_dim]
+
+        returns:
+        out : [ batch_size x out_channels x horizon ]
+        """
+        out = self.blocks[0](x)
+        embed = self.cond_encoder(cond)
+
+        embed = embed.reshape(embed.shape[0], 2, self.out_channels, 1)
+        scale = embed[:, 0, ...]
+        bias = embed[:, 1, ...]
+        out = scale * out + bias
+
+        out = self.blocks[1](out)
+        out = out + self.residual_conv(x)
+        return out
+
+
+class ConditionalUnet1D(nn.Module):
+    def __init__(
+        self,
+        input_dim,
+        global_cond_dim,
+        diffusion_step_embed_dim=256,
+        down_dims=[256, 512, 1024],
+        kernel_size=5,
+        n_groups=8,
+    ):
+        """
+        input_dim: Dim of actions.
+        global_cond_dim: Dim of global conditioning applied with FiLM
+          in addition to diffusion step embedding. This is usually obs_horizon * obs_dim
+        diffusion_step_embed_dim: Size of positional encoding for diffusion iteration k
+        down_dims: Channel size for each UNet level.
+          The length of this array determines numebr of levels.
+        kernel_size: Conv kernel size
+        n_groups: Number of groups for GroupNorm
+        """
+
+        super().__init__()
+        all_dims = [input_dim] + list(down_dims)
+        start_dim = down_dims[0]
+
+        dsed = diffusion_step_embed_dim
+        diffusion_step_encoder = nn.Sequential(
+            SinusoidalPosEmb(dsed),
+            nn.Linear(dsed, dsed * 4),
+            nn.Mish(),
+            nn.Linear(dsed * 4, dsed),
+        )
+        cond_dim = dsed + global_cond_dim
+
+        in_out = list(zip(all_dims[:-1], all_dims[1:]))
+        mid_dim = all_dims[-1]
+        self.mid_modules = nn.ModuleList(
+            [
+                ConditionalResidualBlock1D(
+                    mid_dim,
+                    mid_dim,
+                    cond_dim=cond_dim,
+                    kernel_size=kernel_size,
+                    n_groups=n_groups,
+                ),
+                ConditionalResidualBlock1D(
+                    mid_dim,
+                    mid_dim,
+                    cond_dim=cond_dim,
+                    kernel_size=kernel_size,
+                    n_groups=n_groups,
+                ),
+            ]
+        )
+
+        down_modules = nn.ModuleList([])
+        for ind, (dim_in, dim_out) in enumerate(in_out):
+            is_last = ind >= (len(in_out) - 1)
+            down_modules.append(
+                nn.ModuleList(
+                    [
+                        ConditionalResidualBlock1D(
+                            dim_in,
+                            dim_out,
+                            cond_dim=cond_dim,
+                            kernel_size=kernel_size,
+                            n_groups=n_groups,
+                        ),
+                        ConditionalResidualBlock1D(
+                            dim_out,
+                            dim_out,
+                            cond_dim=cond_dim,
+                            kernel_size=kernel_size,
+                            n_groups=n_groups,
+                        ),
+                        Downsample1d(dim_out) if not is_last else nn.Identity(),
+                    ]
+                )
+            )
+
+        up_modules = nn.ModuleList([])
+        for ind, (dim_in, dim_out) in enumerate(reversed(in_out[1:])):
+            is_last = ind >= (len(in_out) - 1)
+            up_modules.append(
+                nn.ModuleList(
+                    [
+                        ConditionalResidualBlock1D(
+                            dim_out * 2,
+                            dim_in,
+                            cond_dim=cond_dim,
+                            kernel_size=kernel_size,
+                            n_groups=n_groups,
+                        ),
+                        ConditionalResidualBlock1D(
+                            dim_in,
+                            dim_in,
+                            cond_dim=cond_dim,
+                            kernel_size=kernel_size,
+                            n_groups=n_groups,
+                        ),
+                        Upsample1d(dim_in) if not is_last else nn.Identity(),
+                    ]
+                )
+            )
+
+        final_conv = nn.Sequential(
+            Conv1dBlock(start_dim, start_dim, kernel_size=kernel_size),
+            nn.Conv1d(start_dim, input_dim, 1),
+        )
+
+        self.diffusion_step_encoder = diffusion_step_encoder
+        self.up_modules = up_modules
+        self.down_modules = down_modules
+        self.final_conv = final_conv
+
+        n_params = sum(p.numel() for p in self.parameters())
+        print(f"number of parameters: {n_params / 1e6:.2f}M")
+
+    def forward(
+        self,
+        sample: torch.Tensor,
+        timestep: Union[torch.Tensor, float, int],
+        global_cond=None,
+    ):
+        """
+        x: (B,T,input_dim)
+        timestep: (B,) or int, diffusion step
+        global_cond: (B,global_cond_dim)
+        output: (B,T,input_dim)
+        """
+        # (B,T,C)
+        sample = sample.moveaxis(-1, -2)
+        # (B,C,T)
+
+        #  time
+        timesteps = timestep
+        if not torch.is_tensor(timesteps):
+            # this requires sync between CPU and GPU. So try to pass timesteps as tensors if you can
+            timesteps = torch.tensor(
+                [timesteps], dtype=torch.long, device=sample.device
+            )
+        elif torch.is_tensor(timesteps) and len(timesteps.shape) == 0:
+            timesteps = timesteps[None].to(sample.device)
+
+        # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
+        timesteps = timesteps.expand(sample.shape[0])
+
+        global_feature = self.diffusion_step_encoder(timesteps)
+
+        if global_cond is not None:
+            global_feature = torch.cat([global_feature, global_cond], axis=-1)
+
+        x = sample
+        h = []
+        for idx, (resnet, resnet2, downsample) in enumerate(self.down_modules):
+            x = resnet(x, global_feature)
+            x = resnet2(x, global_feature)
+            h.append(x)
+            x = downsample(x)
+
+        for mid_module in self.mid_modules:
+            x = mid_module(x, global_feature)
+
+        for idx, (resnet, resnet2, upsample) in enumerate(self.up_modules):
+            x = torch.cat((x, h.pop()), dim=1)
+            x = resnet(x, global_feature)
+            x = resnet2(x, global_feature)
+            x = upsample(x)
+
+        x = self.final_conv(x)
+
+        # (B,C,T)
+        x = x.moveaxis(-1, -2)
+        # (B,T,C)
+        return x
+
+
+class DiffusionAgent(nn.Module):
+    def __init__(self, args):
+        # TODO: make the args explicit
+
+        super().__init__()
+        self.obs_horizon = args.obs_horizon
+        self.act_horizon = args.act_horizon
+        self.pred_horizon = args.pred_horizon
+        self.act_dim = args.action_dim
+        self.obs_dim = args.obs_dim
+
+        self.noise_pred_net = ConditionalUnet1D(
+            input_dim=self.act_dim,  # act_horizon is not used (U-Net doesn't care)
+            global_cond_dim=self.obs_horizon * self.obs_dim,
+            diffusion_step_embed_dim=args.diffusion_step_embed_dim,
+            down_dims=args.unet_dims,
+            n_groups=args.n_groups,
+        )
+        self.num_diffusion_iters = 100
+        self.noise_scheduler = DDPMScheduler(
+            num_train_timesteps=self.num_diffusion_iters,
+            beta_schedule="squaredcos_cap_v2",  # has big impact on performance, try not to change
+            clip_sample=True,  # clip output to [-1,1] to improve stability
+            prediction_type="epsilon",  # predict noise (instead of denoised action)
+        )
+
+    def compute_loss(self, obs_seq, action_seq):
+        B = obs_seq.shape[0]
+
+        # observation as FiLM conditioning
+        obs_cond = obs_seq.flatten(start_dim=1)  # (B, obs_horizon * obs_dim)
+
+        # sample noise to add to actions
+        noise = torch.randn((B, self.pred_horizon, self.act_dim), device=device)
+
+        # sample a diffusion iteration for each data point
+        timesteps = torch.randint(
+            0, self.noise_scheduler.config.num_train_timesteps, (B,), device=device
+        ).long()
+
+        # add noise to the clean images(actions) according to the noise magnitude at each diffusion iteration
+        # (this is the forward diffusion process)
+        noisy_action_seq = self.noise_scheduler.add_noise(action_seq, noise, timesteps)
+
+        # predict the noise residual
+        noise_pred = self.noise_pred_net(
+            noisy_action_seq, timesteps, global_cond=obs_cond
+        )
+
+        return F.mse_loss(noise_pred, noise)
+
+    def get_action(self, obs_seq):
+        # init scheduler
+        # self.noise_scheduler.set_timesteps(self.num_diffusion_iters)
+        # set_timesteps will change noise_scheduler.timesteps is only used in noise_scheduler.step()
+        # noise_scheduler.step() is only called during inference
+        # if we use DDPM, and inference_diffusion_steps == train_diffusion_steps, then we can skip this
+
+        # obs_seq: (B, obs_horizon, obs_dim)
+        B = obs_seq.shape[0]
+        with torch.no_grad():
+            obs_cond = obs_seq.flatten(start_dim=1)  # (B, obs_horizon * obs_dim)
+
+            # initialize action from Guassian noise
+            noisy_action_seq = torch.randn(
+                (B, self.pred_horizon, self.act_dim), device=obs_seq.device
+            )
+
+            for k in self.noise_scheduler.timesteps:
+                # predict noise
+                noise_pred = self.noise_pred_net(
+                    sample=noisy_action_seq,
+                    timestep=k,
+                    global_cond=obs_cond,
+                )
+
+                # inverse diffusion step (remove noise)
+                noisy_action_seq = self.noise_scheduler.step(
+                    model_output=noise_pred,
+                    timestep=k,
+                    sample=noisy_action_seq,
+                ).prev_sample
+
+        # only take act_horizon number of actions
+        start = self.obs_horizon - 1
+        end = start + self.act_horizon
+        return noisy_action_seq[:, start:end]  # (B, act_horizon, act_dim)
+
+
+# TODO (later): Add EMAModel (Exponential Moving Average) to stabilize the UNet weights.
+# Remind about callig EMA.step()
 
 
 def train_bc_epoch(model, loader, optimizer, scheduler, device, noise_std=None):
@@ -965,30 +1332,21 @@ def train_bc_epoch(model, loader, optimizer, scheduler, device, noise_std=None):
         # Load data on device and reset the gradients
         # NOTE: z was also computed based on some of the above raw tensors,
         # this is not redundant anyway since the GAT can learn to combine these features in a non-linear way
+        # TODO: In train_bc_epoch, flatten the obs_seq from [Batch, 2, 66] to [Batch, 132] to use as global_cond.
         z = batch["priv_states"]["embeddings"].to(device)
         gripper = batch["obs"][:, 18:26].to(device)  # is_grasped + tcp_pose
         proprio = batch["priv_states"]["articulations"]["panda"][:, 13:31].to(device)
         target_action = batch["action"].to(device)
-        optimizer.zero_grad()
-
-        # Data augmentation
-        #
-        # NOTE: Maybe this could lead to errors since TCP should be the consequence of the rest of the environment,
-        # so adding noise to it may break the physical consistency of the data;
-        # however, I think that if the noise is small enough, it should be fine and actually help the model to generalize better
-        # anyway, ManiSkill benchmark doesnt do it, so lets just avoid it
-        if noise_std is not None:
-            z = z + torch.randn_like(z) * noise_std
-            gripper = gripper + torch.randn_like(gripper) * (noise_std * 0.5)
-            proprio = proprio + torch.randn_like(proprio) * noise_std
 
         # Forward pass
-        out = model(z, gripper, proprio)
-
-        # Loss
-        loss = F.mse_loss(out, target_action)
+        loss = model.compute_loss(
+            # TODO: Use the proper tensors
+            obs_seq=batch["observations"],  # obs_batch_dict['state'] is (B, L, obs_dim)
+            action_seq=batch["actions"],  # (B, L, act_dim)
+        )
 
         # Backward pass
+        optimizer.zero_grad()
         loss.backward()
         optimizer.step()
 
@@ -1001,6 +1359,7 @@ def train_bc_epoch(model, loader, optimizer, scheduler, device, noise_std=None):
     return total_loss / len(loader.dataset)
 
 
+# TODO: update just like train
 @torch.no_grad()
 def validate_bc(model, loader, device):
     model.eval()
@@ -1052,14 +1411,9 @@ bc_train_loader = TorchDataLoader(
 bc_val_loader = TorchDataLoader(bc_val_dataset, batch_size=BC_BATCH_SIZE)
 
 # Prepare the model, optmizer, eventually scheduler etc.
-policy = MLPGraphStateBCPolicy(
-    z_dim=GAT_LATENT_CHANNELS
-    * num_nodes,  # Flattened GAT latent embeddings for all nodes
-    proprio_dim=BC_PROPRIO_DIM,
-    gripper_dim=BC_GRIPPER_DIM,
-    action_dim=BC_ACTION_DIM,
-    hidden_dim=BC_HIDDEN_DIM,
-).to(device)
+# TODO: Substitute with DiffusionAgent
+policy = DiffusionAgent().to(device)
+
 bc_optimizer = torch.optim.AdamW(policy.parameters(), lr=BC_LR)
 bc_scheduler = None
 

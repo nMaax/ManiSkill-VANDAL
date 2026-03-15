@@ -311,3 +311,38 @@ return: 0.0200
 episode_len: 50.0000
 reward: 0.0004
 success_at_end: 0.0100
+
+◄ 7s ◎ set seed 1             (maniskill_env) □ ManiSkill △ VANDAL-test⋯⎪●◦⎥ py ⌉⌊ 3.10.19 conda ◯ maniskill_env 12:43
+       set demos 100
+       python examples/baselines/diffusion_policy/train.py --env-id PickCube-v1 \
+             --demo-path ~/.maniskill/demos/PickCube-v1/motionplanning/trajectory.state.pd_ee_delta_pos.physx_cpu.h5 \
+
+             --control-mode "pd_ee_delta_pos" --sim-backend "gpu" --num-demos {$demos} --max_episode_steps 100 \
+             --total_iters 30000 \
+             --exp-name diffusion_policy-PickCube-v1-state-{$demos}_motionplanning_demos-{$seed}
+/home/massimiliano/miniconda3/envs/maniskill_env/lib/python3.10/site-packages/sapien/__init__.py:18: UserWarning: pkg_resources is deprecated as an API. See https://setuptools.pypa.io/en/latest/pkg_resources.html. The pkg_resources package is slated for removal as early as 2025-11-30. Refrain from using this package or pin to Setuptools<81.
+  import pkg_resources
+Loading HDF5 file /home/massimiliano/.maniskill/demos/PickCube-v1/motionplanning/trajectory.state.pd_ee_delta_pos.physx_cpu.h5
+Loaded
+Load observations 100 <class 'numpy.ndarray'>
+Load actions 100 <class 'numpy.ndarray'>
+Total transitions: 7720, Total obs sequences: 7620
+number of parameters: 4.39M
+number of parameters: 4.39M
+100%|███████████████████████████████████████████████████████████████████████████████| 100/100 [01:16<00:00,  1.30it/s]
+Evaluated 10 episodes███████████████████████████████████████████████████████████████| 100/100 [01:16<00:00,  1.41it/s]
+success_once: 0.0000
+return: 0.0000
+episode_len: 100.0000
+reward: 0.0000
+success_at_end: 0.0000
+100%|███████████████████████████████████████████████████████████████████████████████| 100/100 [01:14<00:00,  1.35it/s]
+Evaluated 10 episodes███████████████████████████████████████████████████████████████| 100/100 [01:14<00:00,  1.30it/s]
+success_once: 0.9300
+return: 27.0900
+episode_len: 100.0000
+reward: 0.2709
+success_at_end: 0.8000
+New best success_once_rate: 0.9300. Saving checkpoint.
+New best success_at_end_rate: 0.8000. Saving checkpoint.
+ 31%|███████████████████▏                                          | 9303/30000 [06:42<11:41, 29.49it/s, loss=0.00295]

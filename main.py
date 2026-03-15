@@ -47,6 +47,9 @@ from gnn import (
     GAT_ATTENTION_HEADS,
 )
 
+# Allow numpy types to be loaded in weights_only mode
+torch.serialization.add_safe_globals([np.ndarray, np.dtype, np.dtypes.UInt32DType])
+torch.serialization.add_safe_globals([np._core.multiarray._reconstruct])
 
 # Argument Parsing
 parser = argparse.ArgumentParser(

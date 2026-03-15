@@ -1,4 +1,4 @@
-ALGO_NAME = 'BC_Diffusion_state_UNet'
+ALGO_NAME = "BC_Diffusion_state_UNet"
 
 import os
 import random
@@ -26,6 +26,7 @@ from diffusion_policy.conditional_unet1d import ConditionalUnet1D
 from dataclasses import dataclass, field
 from typing import Optional, List
 import tyro
+
 
 @dataclass
 class Args:
@@ -62,12 +63,14 @@ class Args:
     # Diffusion Policy specific arguments
     lr: float = 1e-4
     """the learning rate of the diffusion policy"""
-    obs_horizon: int = 2 # Seems not very important in ManiSkill, 1, 2, 4 work well
-    act_horizon: int = 8 # Seems not very important in ManiSkill, 4, 8, 15 work well
-    pred_horizon: int = 16 # 16->8 leads to worse performance, maybe it is like generate a half image; 16->32, improvement is very marginal
-    diffusion_step_embed_dim: int = 64 # not very important
-    unet_dims: List[int] = field(default_factory=lambda: [64, 128, 256]) # default setting is about ~4.5M params
-    n_groups: int = 8 # jigu says it is better to let each group have at least 8 channels; it seems 4 and 8 are simila
+    obs_horizon: int = 2  # Seems not very important in ManiSkill, 1, 2, 4 work well
+    act_horizon: int = 8  # Seems not very important in ManiSkill, 4, 8, 15 work well
+    pred_horizon: int = 16  # 16->8 leads to worse performance, maybe it is like generate a half image; 16->32, improvement is very marginal
+    diffusion_step_embed_dim: int = 64  # not very important
+    unet_dims: List[int] = field(
+        default_factory=lambda: [64, 128, 256]
+    )  # default setting is about ~4.5M params
+    n_groups: int = 8  # jigu says it is better to let each group have at least 8 channels; it seems 4 and 8 are simila
 
     # Environment/experiment specific arguments
     max_episode_steps: Optional[int] = None
@@ -87,19 +90,20 @@ class Args:
     """the simulation backend to use for evaluation environments. can be "cpu" or "gpu"""
     num_dataload_workers: int = 0
     """the number of workers to use for loading the training data in the torch dataloader"""
-    control_mode: str = 'pd_joint_delta_pos'
+    control_mode: str = "pd_joint_delta_pos"
     """the control mode to use for the evaluation environments. Must match the control mode of the demonstration dataset."""
 
     # additional tags/configs for logging purposes to wandb and shared comparisons with other algorithms
     demo_type: Optional[str] = None
 
 
-class SmallDemoDataset_DiffusionPolicy(Dataset): # Load everything into GPU memory
+class SmallDemoDataset_DiffusionPolicy(Dataset):  # Load everything into GPU memory
     def __init__(self, data_path, device, num_traj):
-        if data_path[-4:] == '.pkl':
+        if data_path[-4:] == ".pkl":
             raise NotImplementedError()
         else:
             from diffusion_policy.utils import load_demo_dataset
+
             trajectories = load_demo_dataset(data_path, num_traj=num_traj, concat=False)
             # trajectories['observations'] is a list of np.ndarray (L+1, obs_dim)
             # trajectories['actions'] is a list of np.ndarray (L, act_dim)
@@ -109,19 +113,27 @@ class SmallDemoDataset_DiffusionPolicy(Dataset): # Load everything into GPU memo
                 trajectories[k][i] = torch.Tensor(v[i]).to(device)
 
         # Pre-compute all possible (traj_idx, start, end) tuples, this is very specific to Diffusion Policy
-        if 'delta_pos' in args.control_mode or args.control_mode == 'base_pd_joint_vel_arm_pd_joint_vel':
-            self.pad_action_arm = torch.zeros((trajectories['actions'][0].shape[1]-1,), device=device)
+        if (
+            "delta_pos" in args.control_mode
+            or args.control_mode == "base_pd_joint_vel_arm_pd_joint_vel"
+        ):
+            self.pad_action_arm = torch.zeros(
+                (trajectories["actions"][0].shape[1] - 1,), device=device
+            )
             # to make the arm stay still, we pad the action with 0 in 'delta_pos' control mode
             # gripper action needs to be copied from the last action
         # else:
         #     raise NotImplementedError(f'Control Mode {args.control_mode} not supported')
-        self.obs_horizon, self.pred_horizon = obs_horizon, pred_horizon = args.obs_horizon, args.pred_horizon
+        self.obs_horizon, self.pred_horizon = obs_horizon, pred_horizon = (
+            args.obs_horizon,
+            args.pred_horizon,
+        )
         self.slices = []
-        num_traj = len(trajectories['actions'])
+        num_traj = len(trajectories["actions"])
         total_transitions = 0
         for traj_idx in range(num_traj):
-            L = trajectories['actions'][traj_idx].shape[0]
-            assert trajectories['observations'][traj_idx].shape[0] == L + 1
+            L = trajectories["actions"][traj_idx].shape[0]
+            assert trajectories["observations"][traj_idx].shape[0] == L + 1
             total_transitions += L
 
             # |o|o|                             observations: 2
@@ -134,32 +146,40 @@ class SmallDemoDataset_DiffusionPolicy(Dataset): # Load everything into GPU memo
             # Pad after the trajectory, so all the observations are utilized in training
             # Note that in the original code, pad_after = act_horizon - 1, but I think this is not the best choice
             self.slices += [
-                (traj_idx, start, start + pred_horizon) for start in range(-pad_before, L - pred_horizon + pad_after)
+                (traj_idx, start, start + pred_horizon)
+                for start in range(-pad_before, L - pred_horizon + pad_after)
             ]  # slice indices follow convention [start, end)
 
-        print(f"Total transitions: {total_transitions}, Total obs sequences: {len(self.slices)}")
+        print(
+            f"Total transitions: {total_transitions}, Total obs sequences: {len(self.slices)}"
+        )
 
         self.trajectories = trajectories
 
     def __getitem__(self, index):
         traj_idx, start, end = self.slices[index]
-        L, act_dim = self.trajectories['actions'][traj_idx].shape
+        L, act_dim = self.trajectories["actions"][traj_idx].shape
 
-        obs_seq = self.trajectories['observations'][traj_idx][max(0, start):start+self.obs_horizon]
+        obs_seq = self.trajectories["observations"][traj_idx][
+            max(0, start) : start + self.obs_horizon
+        ]
         # start+self.obs_horizon is at least 1
-        act_seq = self.trajectories['actions'][traj_idx][max(0, start):end]
-        if start < 0: # pad before the trajectory
+        act_seq = self.trajectories["actions"][traj_idx][max(0, start) : end]
+        if start < 0:  # pad before the trajectory
             obs_seq = torch.cat([obs_seq[0].repeat(-start, 1), obs_seq], dim=0)
             act_seq = torch.cat([act_seq[0].repeat(-start, 1), act_seq], dim=0)
-        if end > L: # pad after the trajectory
+        if end > L:  # pad after the trajectory
             gripper_action = act_seq[-1, -1]
             pad_action = torch.cat((self.pad_action_arm, gripper_action[None]), dim=0)
-            act_seq = torch.cat([act_seq, pad_action.repeat(end-L, 1)], dim=0)
+            act_seq = torch.cat([act_seq, pad_action.repeat(end - L, 1)], dim=0)
             # making the robot (arm and gripper) stay still
-        assert obs_seq.shape[0] == self.obs_horizon and act_seq.shape[0] == self.pred_horizon
+        assert (
+            obs_seq.shape[0] == self.obs_horizon
+            and act_seq.shape[0] == self.pred_horizon
+        )
         return {
-            'observations': obs_seq,
-            'actions': act_seq,
+            "observations": obs_seq,
+            "actions": act_seq,
         }
 
     def __len__(self):
@@ -172,15 +192,19 @@ class Agent(nn.Module):
         self.obs_horizon = args.obs_horizon
         self.act_horizon = args.act_horizon
         self.pred_horizon = args.pred_horizon
-        assert len(env.single_observation_space.shape) == 2 # (obs_horizon, obs_dim)
-        assert len(env.single_action_space.shape) == 1 # (act_dim, )
-        assert (env.single_action_space.high == 1).all() and (env.single_action_space.low == -1).all()
+        assert len(env.single_observation_space.shape) == 2  # (obs_horizon, obs_dim)
+        assert len(env.single_action_space.shape) == 1  # (act_dim, )
+        assert (env.single_action_space.high == 1).all() and (
+            env.single_action_space.low == -1
+        ).all()
         # denoising results will be clipped to [-1,1], so the action should be in [-1,1] as well
         self.act_dim = env.single_action_space.shape[0]
 
         self.noise_pred_net = ConditionalUnet1D(
-            input_dim=self.act_dim, # act_horizon is not used (U-Net doesn't care)
-            global_cond_dim=np.prod(env.single_observation_space.shape), # obs_horizon * obs_dim
+            input_dim=self.act_dim,  # act_horizon is not used (U-Net doesn't care)
+            global_cond_dim=np.prod(
+                env.single_observation_space.shape
+            ),  # obs_horizon * obs_dim
             diffusion_step_embed_dim=args.diffusion_step_embed_dim,
             down_dims=args.unet_dims,
             n_groups=args.n_groups,
@@ -188,34 +212,33 @@ class Agent(nn.Module):
         self.num_diffusion_iters = 100
         self.noise_scheduler = DDPMScheduler(
             num_train_timesteps=self.num_diffusion_iters,
-            beta_schedule='squaredcos_cap_v2', # has big impact on performance, try not to change
-            clip_sample=True, # clip output to [-1,1] to improve stability
-            prediction_type='epsilon' # predict noise (instead of denoised action)
+            beta_schedule="squaredcos_cap_v2",  # has big impact on performance, try not to change
+            clip_sample=True,  # clip output to [-1,1] to improve stability
+            prediction_type="epsilon",  # predict noise (instead of denoised action)
         )
 
     def compute_loss(self, obs_seq, action_seq):
         B = obs_seq.shape[0]
 
         # observation as FiLM conditioning
-        obs_cond = obs_seq.flatten(start_dim=1) # (B, obs_horizon * obs_dim)
+        obs_cond = obs_seq.flatten(start_dim=1)  # (B, obs_horizon * obs_dim)
 
         # sample noise to add to actions
         noise = torch.randn((B, self.pred_horizon, self.act_dim), device=device)
 
         # sample a diffusion iteration for each data point
         timesteps = torch.randint(
-            0, self.noise_scheduler.config.num_train_timesteps,
-            (B,), device=device
+            0, self.noise_scheduler.config.num_train_timesteps, (B,), device=device
         ).long()
 
         # add noise to the clean images(actions) according to the noise magnitude at each diffusion iteration
         # (this is the forward diffusion process)
-        noisy_action_seq = self.noise_scheduler.add_noise(
-            action_seq, noise, timesteps)
+        noisy_action_seq = self.noise_scheduler.add_noise(action_seq, noise, timesteps)
 
         # predict the noise residual
         noise_pred = self.noise_pred_net(
-            noisy_action_seq, timesteps, global_cond=obs_cond)
+            noisy_action_seq, timesteps, global_cond=obs_cond
+        )
 
         return F.mse_loss(noise_pred, noise)
 
@@ -229,10 +252,12 @@ class Agent(nn.Module):
         # obs_seq: (B, obs_horizon, obs_dim)
         B = obs_seq.shape[0]
         with torch.no_grad():
-            obs_cond = obs_seq.flatten(start_dim=1) # (B, obs_horizon * obs_dim)
+            obs_cond = obs_seq.flatten(start_dim=1)  # (B, obs_horizon * obs_dim)
 
             # initialize action from Guassian noise
-            noisy_action_seq = torch.randn((B, self.pred_horizon, self.act_dim), device=obs_seq.device)
+            noisy_action_seq = torch.randn(
+                (B, self.pred_horizon, self.act_dim), device=obs_seq.device
+            )
 
             for k in self.noise_scheduler.timesteps:
                 # predict noise
@@ -252,15 +277,20 @@ class Agent(nn.Module):
         # only take act_horizon number of actions
         start = self.obs_horizon - 1
         end = start + self.act_horizon
-        return noisy_action_seq[:, start:end] # (B, act_horizon, act_dim)
+        return noisy_action_seq[:, start:end]  # (B, act_horizon, act_dim)
+
 
 def save_ckpt(run_name, tag):
-    os.makedirs(f'runs/{run_name}/checkpoints', exist_ok=True)
+    os.makedirs(f"runs/{run_name}/checkpoints", exist_ok=True)
     ema.copy_to(ema_agent.parameters())
-    torch.save({
-        'agent': agent.state_dict(),
-        'ema_agent': ema_agent.state_dict(),
-    }, f'runs/{run_name}/checkpoints/{tag}.pt')
+    torch.save(
+        {
+            "agent": agent.state_dict(),
+            "ema_agent": ema_agent.state_dict(),
+        },
+        f"runs/{run_name}/checkpoints/{tag}.pt",
+    )
+
 
 if __name__ == "__main__":
     args = tyro.cli(Args)
@@ -270,18 +300,21 @@ if __name__ == "__main__":
     else:
         run_name = args.exp_name
 
-    if args.demo_path.endswith('.h5'):
+    if args.demo_path.endswith(".h5"):
         import json
-        json_file = args.demo_path[:-2] + 'json'
-        with open(json_file, 'r') as f:
+
+        json_file = args.demo_path[:-2] + "json"
+        with open(json_file, "r") as f:
             demo_info = json.load(f)
-            if 'control_mode' in demo_info['env_info']['env_kwargs']:
-                control_mode = demo_info['env_info']['env_kwargs']['control_mode']
-            elif 'control_mode' in demo_info['episodes'][0]:
-                control_mode = demo_info['episodes'][0]['control_mode']
+            if "control_mode" in demo_info["env_info"]["env_kwargs"]:
+                control_mode = demo_info["env_info"]["env_kwargs"]["control_mode"]
+            elif "control_mode" in demo_info["episodes"][0]:
+                control_mode = demo_info["episodes"][0]["control_mode"]
             else:
-                raise Exception('Control mode not found in json')
-            assert control_mode == args.control_mode, f"Control mode mismatched. Dataset has control mode {control_mode}, but args has control mode {args.control_mode}"
+                raise Exception("Control mode not found in json")
+            assert control_mode == args.control_mode, (
+                f"Control mode mismatched. Dataset has control mode {control_mode}, but args has control mode {args.control_mode}"
+            )
     assert args.obs_horizon + args.act_horizon - 1 <= args.pred_horizon
     assert args.obs_horizon >= 1 and args.act_horizon >= 1 and args.pred_horizon >= 1
 
@@ -294,16 +327,37 @@ if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
 
     # env setup
-    env_kwargs = dict(control_mode=args.control_mode, reward_mode="sparse", obs_mode="state", render_mode="rgb_array", human_render_camera_configs=dict(shader_pack="default"))
-    assert args.max_episode_steps != None, "max_episode_steps must be specified as imitation learning algorithms task solve speed is dependent on the data you train on"
+    env_kwargs = dict(
+        control_mode=args.control_mode,
+        reward_mode="sparse",
+        obs_mode="state",
+        render_mode="rgb_array",
+        human_render_camera_configs=dict(shader_pack="default"),
+    )
+    assert args.max_episode_steps != None, (
+        "max_episode_steps must be specified as imitation learning algorithms task solve speed is dependent on the data you train on"
+    )
     env_kwargs["max_episode_steps"] = args.max_episode_steps
     other_kwargs = dict(obs_horizon=args.obs_horizon)
-    envs = make_eval_envs(args.env_id, args.num_eval_envs, args.sim_backend, env_kwargs, other_kwargs, video_dir=f'runs/{run_name}/videos' if args.capture_video else None)
+    envs = make_eval_envs(
+        args.env_id,
+        args.num_eval_envs,
+        args.sim_backend,
+        env_kwargs,
+        other_kwargs,
+        video_dir=f"runs/{run_name}/videos" if args.capture_video else None,
+    )
 
     if args.track:
         import wandb
+
         config = vars(args)
-        config["eval_env_cfg"] = dict(**env_kwargs, num_envs=args.num_eval_envs, env_id=args.env_id, env_horizon=args.max_episode_steps)
+        config["eval_env_cfg"] = dict(
+            **env_kwargs,
+            num_envs=args.num_eval_envs,
+            env_id=args.env_id,
+            env_horizon=args.max_episode_steps,
+        )
         wandb.init(
             project=args.wandb_project_name,
             entity=args.wandb_entity,
@@ -312,16 +366,19 @@ if __name__ == "__main__":
             name=run_name,
             save_code=True,
             group="DiffusionPolicy",
-            tags=["diffusion_policy"]
+            tags=["diffusion_policy"],
         )
     writer = SummaryWriter(f"runs/{run_name}")
     writer.add_text(
         "hyperparameters",
-        "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
+        "|param|value|\n|-|-|\n%s"
+        % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
     )
 
     # dataloader setup
-    dataset = SmallDemoDataset_DiffusionPolicy(args.demo_path, device, num_traj=args.num_demos)
+    dataset = SmallDemoDataset_DiffusionPolicy(
+        args.demo_path, device, num_traj=args.num_demos
+    )
     sampler = RandomSampler(dataset, replacement=False)
     batch_sampler = BatchSampler(sampler, batch_size=args.batch_size, drop_last=True)
     batch_sampler = IterationBasedBatchSampler(batch_sampler, args.total_iters)
@@ -336,12 +393,13 @@ if __name__ == "__main__":
 
     # agent setup
     agent = Agent(envs, args).to(device)
-    optimizer = optim.AdamW(params=agent.parameters(),
-        lr=args.lr, betas=(0.95, 0.999), weight_decay=1e-6)
+    optimizer = optim.AdamW(
+        params=agent.parameters(), lr=args.lr, betas=(0.95, 0.999), weight_decay=1e-6
+    )
 
     # Cosine LR schedule with linear warmup
     lr_scheduler = get_scheduler(
-        name='cosine',
+        name="cosine",
         optimizer=optimizer,
         num_warmup_steps=500,
         num_training_steps=args.total_iters,
@@ -380,6 +438,7 @@ if __name__ == "__main__":
                     print(
                         f"New best {k}_rate: {eval_metrics[k]:.4f}. Saving checkpoint."
                     )
+
     def log_metrics(iteration):
         if iteration % args.log_freq == 0:
             writer.add_scalar(
@@ -401,7 +460,9 @@ if __name__ == "__main__":
         # forward and compute loss
         last_tick = time.time()
         total_loss = agent.compute_loss(
-            obs_seq=data_batch["observations"],  # obs_batch_dict['state'] is (B, L, obs_dim)
+            obs_seq=data_batch[
+                "observations"
+            ],  # obs_batch_dict['state'] is (B, L, obs_dim)
             action_seq=data_batch["actions"],  # (B, L, act_dim)
         )
         timings["forward"] += time.time() - last_tick

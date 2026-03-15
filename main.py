@@ -13,6 +13,7 @@ from pathlib import Path
 from datetime import datetime
 from tqdm import tqdm
 import math
+from collections import deque
 
 import numpy as np
 import h5py
@@ -36,8 +37,13 @@ from gnn import (
     print_dict_tree,
     get_all_episode_lengths,
     build_graph,
-    GAT_LATENT_CHANNELS,
+    GATAutoencoder,
     NUM_NODES,
+    IN_CHANNELS,
+    GAT_CHECKPOINT_PATH,
+    GAT_HIDDEN_CHANNELS,
+    GAT_LATENT_CHANNELS,
+    GAT_ATTENTION_HEADS,
 )
 
 
@@ -971,12 +977,12 @@ if CHECKPOINT_PATH.exists():
     start_epoch = checkpoint.get("epoch", -1) + 1
     best_val_loss = checkpoint.get("val_loss", float("inf"))
     print(
-        f"Loaded BC checkpoint from epoch {start_epoch} with best val loss: {best_val_loss:.5f}"
+        f"Loaded Diffusion checkpoint from epoch {start_epoch} with best val loss: {best_val_loss:.5f}"
     )
 else:
     # Proceed with training from scratch
     start_epoch = 0
-    print("No BC checkpoint found. Starting training from scratch.")
+    print("No Diffusion checkpoint found. Starting training from scratch.")
 
 # Train the model for the missing epochs
 for epoch in range(start_epoch, EPOCHS):
@@ -1029,7 +1035,6 @@ if CHECKPOINT_PATH.exists():
 def evaluate_graph_policy(gae_model, diff_model, num_episodes=100):
     # Reference:
     #   https://gymnasium.farama.org/api/env/
-    #   https://gymnasium.farama.org/api/registry/#gymnasium.make
     #   mani_skill/envs/tasks/tabletop/pick_cube.py
 
     env = gym.make(
@@ -1044,56 +1049,95 @@ def evaluate_graph_policy(gae_model, diff_model, num_episodes=100):
     diff_model.eval()
     successes = 0
 
-    print(f"Evaluating Graph Policy over {num_episodes} episodes...")
+    print(f"Evaluating Diffusion Graph Policy over {num_episodes} episodes...")
     for seed in tqdm(range(num_episodes)):
         obs, _ = env.reset(seed=seed)
         done = False
 
-        while not done:
-            live_states = env.unwrapped.get_state_dict()
+        # Initialize the rolling buffer for the observation history
+        obs_buffer = deque(maxlen=OBS_HORIZON)
 
-            quick_dataset = [
-                {
-                    "priv_states": live_states,
-                    "obs": obs,
-                }
-            ]
-            built_graph = build_graph(quick_dataset, 0)
-            built_graph = built_graph.to(device)
+        # Helper function to extract the 66D vector from the current environment state
+        def get_current_obs_vector(current_obs, current_env):
+            live_states = current_env.unwrapped.get_state_dict()
+
+            # Build the graph and encode it on the fly
+            quick_dataset = [{"priv_states": live_states, "obs": current_obs}]
+            built_graph = build_graph(quick_dataset, 0).to(device)
 
             with torch.no_grad():
-                z = gae_model.encode(built_graph)
+                # gae_model.encode returns [1, 40]. Squeeze it to [40] for the buffer
+                z = gae_model.encode(built_graph).squeeze(0)
 
-                gripper = obs[0, 18:26].detach().clone().unsqueeze(0).to(device)
-                proprio = (
-                    live_states["articulations"]["panda"][0, 13:31]
-                    .detach()
-                    .clone()
-                    .unsqueeze(0)
-                    .to(device)
-                )
-
-                action = diff_model(z, gripper, proprio)
-                # Could rather use tanh as last activation function in the model to enforce this
-                action = torch.clamp(action, -1.0, 1.0)
-
-            obs, reward, terminated, truncated, info = env.step(
-                action.cpu().numpy().squeeze()
+            # Extract gripper and proprio
+            gripper = current_obs[0, 18:26].detach().clone().to(device)
+            proprio = (
+                live_states["articulations"]["panda"][0, 13:31]
+                .detach()
+                .clone()
+                .to(device)
             )
 
-            if RENDER:
-                env.render()
+            # Concatenate into the final 66D vector
+            return torch.cat([z.flatten(), gripper, proprio], dim=-1)
 
-            if info.get("success", False):
-                successes += 1
-                break
+        # Bootstrap the buffer with the first observation (pad the beginning)
+        first_obs_vec = get_current_obs_vector(obs, env)
+        for _ in range(OBS_HORIZON):
+            obs_buffer.append(first_obs_vec)
 
-            done = terminated or truncated
+        step_count = 0
+        while not done and step_count < 100:
+            # Stack the rolling buffer into a sequence: [1, OBS_HORIZON, 66]
+            obs_seq = torch.stack(list(obs_buffer)).unsqueeze(0)
+
+            # Diffusion process: Denoise 100 times to get the action sequence
+            with torch.no_grad():
+                # Returns [1, ACT_HORIZON, ACTION_DIM]
+                action_chunk = diff_model.get_action(obs_seq)
+                action_chunk = action_chunk.squeeze(0).cpu().numpy()
+
+            # Inner Execution Loop: Execute the predicted chunk up to ACT_HORIZON
+            for i in range(ACT_HORIZON):
+                action = action_chunk[i]
+                action = np.clip(action, -1.0, 1.0)  # Always clamp real robot actions!
+
+                # Step the simulator
+                obs, reward, terminated, truncated, info = env.step(action)
+                step_count += 1
+
+                if RENDER:
+                    env.render()
+
+                if info.get("success", False):
+                    successes += 1
+                    done = True
+                    break
+
+                done = terminated or truncated
+                if done:
+                    break
+
+                # Update the rolling buffer with the new physical observation, this automatically pushes the oldest frame out!
+                new_obs_vec = get_current_obs_vector(obs, env)
+                obs_buffer.append(new_obs_vec)
 
     env.close()
     sr = (successes / num_episodes) * 100
     print(f"Success rate: {sr}%")
     return sr
 
+
+gnn_model = GATAutoencoder(
+    NUM_NODES,
+    IN_CHANNELS,
+    GAT_HIDDEN_CHANNELS,
+    GAT_LATENT_CHANNELS,
+    GAT_ATTENTION_HEADS,
+).to(device)
+if GAT_CHECKPOINT_PATH.exists():
+    print(f"Loading best GAT model from {GAT_CHECKPOINT_PATH}")
+    checkpoint = torch.load(GAT_CHECKPOINT_PATH)
+    gnn_model.load_state_dict(checkpoint["model_state_dict"])
 
 graph_sr = evaluate_graph_policy(gnn_model, policy)
